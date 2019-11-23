@@ -1,0 +1,1040 @@
+---
+title: "Analysis of SEM1b \n Metabolic succession"
+author: "Francesco Delogu"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+## Loading libraries and setting
+
+```{r Load r libraries, results='hide', message=F, warning=F}
+library(tidyverse)
+library(matrixStats)
+library(igraph)
+library(MetQy)
+
+options(stringsAsFactors=F)
+
+wd <- paste0(getwd(), "/")
+```
+
+### Save urls
+
+```{r define ulrs}
+
+ko.url <- "https://github.com/fdelogu/kegg_net/raw/master/results/ko.txt"
+
+```
+
+### Download the premade metabolic netowrk and annotation 
+
+```{r download premade matrix and annotation}
+
+download.file(ko.url, paste0(wd, "data/ko.txt"))
+
+```
+
+
+## Load data
+
+```{r Load data}
+
+gene_map <- read.table(paste0(wd, "data/gene_map.txt"), header=T, row.names=1)
+
+KeggAnnotation.MT <- read.table(paste0(wd, "results/RNA_ORFG_KOs.txt"), header=T, col.names=c("ORF", "Kcode")) %>%
+  mutate(D_code = substring(Kcode, 4, 1000))
+
+KeggAnnotation.MP <- read.table(paste0(wd, "results/protein_ORFG_KOs.txt"), header=T, col.names=c("ORF", "Kcode")) %>%
+  mutate(D_code = substring(Kcode, 4, 1000))
+
+KOmap.df <- read.table(paste0(wd, "data/ko.txt"), header=T, sep="\t", colClasses=rep("character", 8), encoding="UTF-8", fill=T, quote="")
+KEGG.Modules.df <- read.table(paste0(wd, "data/Mo.txt"), sep="\t", colClasses=rep("character", 8), encoding="UTF-8", fill=T, quote="")[,1:3] %>%
+  `colnames<-`(c("Mod_code", "Mod_name", "Mod_short")) %>%
+  separate(Mod_code, into=c("nope", "Mod_code")) %>%
+  dplyr::select(-nope)
+
+RNA.tax_map <- read.csv(paste0(wd, "results/RNA_tax_map.csv"))
+protein.tax_map <- read.csv(paste0(wd, "results/protein_tax_map.csv"))
+
+ko_file <- read.table(paste0(wd, "data/KeggAnnotation.txt"), header=F, sep="\t", colClasses="character")
+
+RNA.expr <- read.csv(paste0(wd, "results/RNA_ALL.csv"), header=T, row.names=1)
+protein.expr <- read.csv(paste0(wd, "results/protein_ALL.csv"), header=T, row.names=1)
+colnames(RNA.expr) <- gsub(".", ";", colnames(RNA.expr), fixed=T)
+colnames(protein.expr) <- gsub(".", ";", colnames(protein.expr), fixed=T)
+
+CAZAnnotation.MG <- read.table(paste0(wd, "data/caz_selected_ext.txt"), header=T) %>%
+  `colnames<-`(c("ORF", "CAZ", "CAZ_group", "bin"))
+CAZAnnotation.MT <- read.table(paste0(wd, "results/RNA_ORFG_CAZ.txt"), header=T) %>%
+  `colnames<-`(c("ORF", "CAZ", "CAZ_group", "bin"))
+CAZAnnotation.MP <- read.table(paste0(wd, "results/protein_ORFG_CAZ.txt"), header=T) %>%
+  `colnames<-`(c("ORF", "CAZ", "CAZ_group", "bin"))
+
+SCFA.dd <- read_tsv(paste0(wd, "data/SCFA_SEM1b.tsv")) %>%
+  separate(Sample, into=c("Time", "Replicate"), 2)
+
+meta.dd <- read_tsv(paste0(wd, "data/Metadata_SEM1b.tsv")) %>%
+  separate(Sample, into=c("Time", "Replicate"), 2)
+
+sacch.dd <- read_tsv(paste0(wd, "data/Sacch_table.txt"))
+
+```
+
+## Utility functions
+
+```{r extract multi-entry function}
+
+explosion <- function(df, col1, x){
+  return(df[df[,col1]==x,])
+}
+
+concussion <- function(df1, df2, col1){
+  
+  df3 <- 1:(ncol(df1)+ncol(df2)-1)
+  
+  inter_inex <- unique(df1[,col1])[unique(df1[,col1])%in%unique(df2[,col1])]
+  
+  for(i in inter_inex){
+    
+    left_block <- as.data.frame(explosion(df1, col1, i))
+    right_block <- as.data.frame(explosion(df2, col1, i)[,colnames(df2)[colnames(df2)!=col1]])
+    
+    for(j in 1:nrow(left_block)){
+      for(z in 1:nrow(right_block)){
+        df3 <- rbind(df3, t(c(unlist(left_block[j,]), unlist(right_block[z,]))))
+      }
+    }
+    
+  }
+  
+  colnames(df3) <- c(colnames(df1), colnames(df2)[colnames(df2)!=col1])
+  
+  return(as.data.frame(df3[-1,]))
+}
+
+```
+
+## Trasporters
+
+```{r Transporters}
+
+a <- concussion(KeggAnnotation.MT, KOmap.df, "D_code")
+a <- concussion(a, (RNA.tax_map %>% `colnames<-`(c("ORF", "bin"))), "ORF")
+
+Als.transport.dd <- a %>% filter(D_code%in%c("K10549", "K10550", "K10551")) %>% dplyr::select(ORF, bin, D_name) %>%
+  separate(D_name, into=c("Gene", "Other"), sep=";") %>%
+  separate(Gene, into=c("to_remove", "Gene"), sep=1) %>%
+  dplyr::select(-Other, -to_remove) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System=substr(Gene, 1, 3))
+
+Als.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Als.transport.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Als.transport.dd), "ORF")
+
+Rbs.transport.dd <- a %>% filter(D_code%in%c("K10439", "K10440", "K10441", "K06726")) %>% dplyr::select(ORF, bin, D_name) %>%
+  separate(D_name, into=c("Gene", "Other"), sep=";") %>%
+  separate(Gene, into=c("to_remove", "Gene"), sep=1) %>%
+  dplyr::select(-Other, -to_remove) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System=substr(Gene, 1, 3))
+
+Rbs.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Rbs.transport.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Rbs.transport.dd), "ORF")
+
+Aod.transport.dd <- a %>% filter(D_code%in%c("K01571", "K01572")) %>% dplyr::select(ORF, bin, D_name) %>%
+  separate(D_name, into=c("Gene", "Other"), sep=";") %>%
+  separate(Gene, into=c("to_remove", "Gene"), sep=1) %>%
+  dplyr::select(-Other, -to_remove) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System=substr(Gene, 1, 3))
+
+Aod.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Aod.transport.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Aod.transport.dd), "ORF")
+
+Nha.transport.dd <- a %>% filter(D_code%in%c("K03315")) %>% dplyr::select(ORF, bin, D_name) %>%
+  separate(D_name, into=c("Gene", "Other"), sep=";") %>%
+  separate(Gene, into=c("to_remove", "Gene"), sep=1) %>%
+  dplyr::select(-Other, -to_remove) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System=substr(Gene, 1, 3))
+
+Nha.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Nha.transport.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Nha.transport.dd), "ORF")
+
+Mth.dd <- a %>% filter(D_code%in%c("K00399", "K00400", "K00401", "K00402", "K03421", "K03422")) %>% dplyr::select(ORF, bin, D_name) %>%
+  separate(D_name, into=c("Gene", "Other"), sep=";") %>%
+  separate(Gene, into=c("to_remove", "Gene"), sep=1) %>%
+  dplyr::select(-Other, -to_remove) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="Methanogenesis")
+
+Mth.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Mth.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Mth.dd), "ORF")
+
+Glyco.dd <- a %>% filter(D_code%in%c("K00844", # HK
+                                     "K00845", "K12407", # GLK
+                                     "K00850", # PFK
+                                     "K00873" # PK 
+                                     )) %>% dplyr::select(ORF, bin, D_code) %>%
+  mutate(Gene=case_when(D_code=="K00844"~"HK",
+                        D_code%in%c("K00845", "K12407")~"GLK",
+                        D_code=="K00850"~"PFK",
+                        D_code=="K00873"~"PK")) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="Glycolisys") 
+
+Glyco.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Glyco.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Glyco.dd), "ORF")
+
+Gluco.dd <- a %>% filter(D_code%in%c("K01084", # G6PC
+                                     "K01610", "K01596", #PCK
+                                     "K20370",
+                                     "K01958",
+                                     "K01006",
+                                     "K01007")) %>% dplyr::select(ORF, bin, D_code) %>%
+  mutate(Gene=case_when(D_code=="K01084"~"G6Pase",
+                        D_code%in%c("K01610", "K01596")~"PCK",
+                        D_code=="K20370"~"PEPCK",
+                        D_code=="K01958"~"PC",
+                        D_code=="K01006"~"PPDK",
+                        D_code=="K01007"~"PPS")) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="Gluconeogensis")
+
+Gluco.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Gluco.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Gluco.dd), "ORF")
+
+Penthose.dd <- a %>% filter(D_code%in%c("K01807", "K01808", # D-ribose-5P/D-ribulose-5P
+                                     "K01783", # ribulose/b-D-fructose-6P
+                                     "K00850", "K16370", "K21071", # b-D-fructose-6P/D-glyceraldeide-3P
+                                     "K03841", "K02446", "K11532", "K01086", "K04041", "K01622", # b-D-fructose-6P/D-glyceraldeide-3P
+                                     "K00616", "K13810", # D-erythorse-4P/D-sedo-heptulose-7P
+                                     "K00615")) %>% dplyr::select(ORF, bin, D_code) %>%
+  mutate(Gene=case_when(D_code=="K01807"~"ripA", D_code=="K01808"~"ripB",
+                        D_code=="K01783"~"rpe",
+                        D_code=="K00850"~"pfkA", D_code=="K16370"~"pfkB",
+                        D_code=="K21071"~"pfk-",
+                        D_code=="K03841"~"FBP", D_code=="K02446"~"glpx", D_code=="K11532"~"glpx-SEBP",
+                        D_code=="K01086"~"fbp-SEBP", D_code=="K04041"~"fbp3", D_code=="K01622"~"K01622",
+                        D_code=="K00616"~"E2.2.1.2", D_code=="K13810"~"tal-pgi",
+                        D_code=="K00615"~"tka")) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="Penthose")
+
+Penthose.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,Penthose.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(Penthose.dd), "ORF")
+
+spo.coating.dd <- a %>% filter(D_code%in%c("K06398")) %>% dplyr::select(ORF, bin, D_name) %>%
+  separate(D_name, into=c("Gene", "Other"), sep=";") %>%
+  separate(Gene, into=c("to_remove", "Gene"), sep=1) %>%
+  dplyr::select(-Other, -to_remove) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System=substr(Gene, 1, 3))
+
+spo.coating.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,spo.coating.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(spo.coating.dd), "ORF")
+
+WLP.dd <- a %>% filter(D_code%in%c("K14138", # acsB
+                                     "K00197", # acsC
+                                     "K00194", # acsD
+                                     "K01938" # fhs
+                                   )) %>% dplyr::select(ORF, bin, D_code) %>%
+  mutate(Gene=case_when(D_code=="K14138"~"acsB", D_code=="K00197"~"acsC",
+                        D_code=="K00194"~"acsD", D_code=="K01938"~"fhs")) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="WLP")
+
+WLP.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,WLP.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(WLP.dd), "ORF")
+
+flg.dd <- a %>% filter(D_code%in%c("K02389" # flgD
+                                   )) %>% dplyr::select(ORF, bin, D_code) %>%
+  mutate(Gene=case_when(D_code=="K02389"~"flgD")) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="Motility")
+
+flg.RNA.expr.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,flg.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(flg.dd), "ORF")
+
+
+rbs.plot <- rbind(Rbs.RNA.expr.dd, Als.RNA.expr.dd, Nha.RNA.expr.dd) %>%
+  filter(bin%in%c("TEPI1", "TEPI2", "TISS1", "METH1", "CLOS1"), Time!="t7" | Replicate!="C") %>%
+  ggplot(aes(x=Time, y=as.numeric(Expression), group=ORF, color=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin)  +
+  coord_equal() +
+  theme_classic() +
+  labs(y="log10(transcripts)") +
+  theme(axis.text.x = element_text(angle = 300, hjust = 1), text=element_text(family="Times New Roman"))
+
+
+glyco.plot <- rbind(Glyco.RNA.expr.dd, Gluco.RNA.expr.dd, Aod.RNA.expr.dd) %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2"), Time!="t7" | Replicate!="C") %>%
+  ggplot(aes(x=Time, y=as.numeric(Expression), group=ORF, color=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin) +
+  theme_classic() +
+  coord_equal() +
+  labs(y="log10(transcripts)") +
+  theme(axis.text.x = element_text(angle = 300, hjust = 1), text=element_text(family="Times New Roman"))
+
+PPP.plot <- rbind(Penthose.RNA.expr.dd) %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2"), Time!="t7" | Replicate!="C") %>%
+  ggplot(aes(x=Time, y=as.numeric(Expression), group=ORF, color=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin) +
+  theme_classic()
+
+Mth.plot <- rbind(Mth.RNA.expr.dd) %>%
+  filter(bin%in%c("TEPI1", "TEPI2", "TISS1", "METH1", "CLOS1"), Time!="t7" | Replicate!="C") %>%
+  ggplot(aes(x=Time, y=as.numeric(Expression), group=ORF, color=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin)
+
+spore.plot <- rbind(spo.coating.RNA.expr.dd) %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2"), Time!="t7" | Replicate!="C") %>%
+  ggplot(aes(x=Time, y=as.numeric(Expression), group=ORF, color=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin)  +
+  coord_equal() +
+  theme_classic() +
+  labs(y="log10(transcripts)") +
+  theme(axis.text.x = element_text(angle = 300, hjust = 1), text=element_text(family="Times New Roman"))
+
+WLP.plot <- WLP.RNA.expr.dd %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2"), Time!="t7" | Replicate!="C") %>%
+  ggplot(aes(x=Time, y=as.numeric(Expression), group=ORF, color=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin) +
+  theme_classic() +
+  coord_equal() +
+  labs(y="log10(transcripts)") +
+  theme(axis.text.x = element_text(angle = 300, hjust = 1), text=element_text(family="Times New Roman"))
+
+flg.plot <- flg.RNA.expr.dd %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2"), Time!="t7" | Replicate!="C") %>%
+  ggplot(aes(x=Time, y=as.numeric(Expression), group=ORF, color=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin) +
+  theme_classic() +
+  coord_equal() +
+  labs(y="log10(transcripts)") +
+  theme(axis.text.x = element_text(angle = 300, hjust = 1), text=element_text(family="Times New Roman"))
+
+rbs.plot
+glyco.plot
+PPP.plot
+WLP.plot
+Mth.plot
+flg.plot
+spore.plot
+
+ggsave(rbs.plot, filename="results/rbs.svg", dpi=600, width=6, scale=1)
+ggsave(spore.plot, filename="results/spore.svg", dpi=600, width=8, scale=1)
+ggsave(glyco.plot, filename="results/glyco.svg", dpi=600, width=8, scale=1)
+
+
+```
+
+## lpl check
+
+```{r lpl check}
+
+b <- concussion(KeggAnnotation.MP, KOmap.df, "D_code")
+b <- concussion(b, (protein.tax_map %>% `colnames<-`(c("ORF", "bin"))), "ORF")
+
+mean(unlist(10**RNA.expr[,unique((a %>% filter(grepl("lplA", D_name), bin=="CLOS1"))$ORF)]))
+mean(unlist(10**RNA.expr[,unique((a %>% filter(grepl("lplB", D_name), bin=="CLOS1"))$ORF)]))
+mean(unlist(10**RNA.expr[,unique((a %>% filter(grepl("lplC", D_name), bin=="CLOS1"))$ORF)]))
+
+mean(unlist(10**protein.expr[,unique((b %>% filter(grepl("lplA", D_name), bin=="CLOS1"))$ORF)]))
+mean(unlist(10**protein.expr[,unique((b %>% filter(grepl("lplB", D_name), bin=="CLOS1"))$ORF)]))
+mean(unlist(10**protein.expr[,unique((b %>% filter(grepl("lplC", D_name), bin=="CLOS1"))$ORF)]))
+
+```
+
+## Unified plot
+
+```{r Unified plot}
+
+a.CAZ <- concussion((RNA.tax_map %>% `colnames<-`(c("ORF", "bin"))), (CAZAnnotation.MG %>% select(-bin)), "ORF")
+
+CellCell.dd <- a.CAZ %>% filter(CAZ%in%c("GH5", "GH6", "GH8", "GH9", "GH48")) %>%
+  mutate(Gene=CAZ) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="CellCell")
+
+CellCell.RNA.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,CellCell.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(CellCell.dd), "ORF")
+
+CellGlu.dd <- a.CAZ %>% filter(CAZ%in%c("GH1", "GH2", "GH3", "GH4", "GH94")) %>%
+  mutate(Gene=CAZ) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="CellGlu")
+
+CellGlu.RNA.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,colnames(RNA.expr)%in%CellGlu.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(CellGlu.dd), "ORF")
+
+XylXyl.dd <- a.CAZ %>% filter(CAZ%in%c("GH3", "GH43", "GH10", "GH11", "GH30")) %>%
+  mutate(Gene=CAZ) %>%
+  group_by(ORF, bin, Gene) %>%
+  summarise() %>%
+  ungroup() %>%
+  mutate(System="XylXyl")
+
+XylXyl.RNA.dd <- concussion(as.data.frame(as.data.frame(RNA.expr[,XylXyl.dd$ORF]) %>%
+                                 rownames_to_column(var="Sample") %>%
+                                 gather(key="ORF", value="Expression", -Sample) %>%
+                                 separate(Sample, into=c("Time", "Replicate"), 2)),
+                              data.frame(XylXyl.dd), "ORF")
+
+selected.RNA.expr.dd <- rbind(Gluco.RNA.expr.dd, Glyco.RNA.expr.dd, Penthose.RNA.expr.dd,
+                              WLP.RNA.expr.dd, Mth.RNA.expr.dd,
+                              spo.coating.RNA.expr.dd, flg.RNA.expr.dd,
+                              (Rbs.RNA.expr.dd %>% filter(System=="rbs")),
+                              CellCell.RNA.dd, CellGlu.RNA.dd, XylXyl.RNA.dd)
+
+selected.colors <- rep("", length(unique((selected.RNA.expr.dd %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "COPR0", "TISS1", "TEPI1", "TEPI2", "METH1"), Time!="t7" | Replicate!="C"))$Gene)))
+names(selected.colors) <- unique((selected.RNA.expr.dd %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "COPR0", "TISS1", "TEPI1", "TEPI2", "METH1"), Time!="t7" | Replicate!="C"))$Gene)
+
+systems.arr <- unique((selected.RNA.expr.dd %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "COPR0", "TISS1", "TEPI1", "TEPI2", "METH1"), Time!="t7" | Replicate!="C"))$System)
+
+for(i in systems.arr){
+  tmp.genes <- unique((selected.RNA.expr.dd %>%
+    filter(System==i))$Gene)
+  selected.colors[tmp.genes] <- wesanderson::wes_palette("Darjeeling1", length(tmp.genes), type="continuous")
+  rm(tmp.genes)
+}
+
+selected.expr.plot <- selected.RNA.expr.dd %>%
+  mutate_if(is.character, str_replace_all, pattern="COPR1", replacement="COPR0") %>%
+  filter(bin%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2", "METH1", "COPR0"), Time!="t7" | Replicate!="C") %>%
+  group_by(Time, Replicate, bin, Gene, System) %>%
+  summarise(Expression=log10(sum(10**as.numeric(Expression)))) %>%
+  ggplot(aes(x=Time, y=Expression, group=Gene, color=Gene, fill=Gene)) +
+  geom_point() +
+  geom_smooth(se=F, level=.9, method="gam", formula=y~poly(x, 3)) +
+  facet_grid(System~bin) +
+  theme_classic() +
+  coord_equal() +
+  labs(y="log10(transcripts)") +
+  scale_color_manual(name="Gene", values=selected.colors) +
+  scale_fill_manual(name="Gene", values=selected.colors) +
+  theme(panel.grid.major.x=element_line(colour="gray"),
+        panel.grid.major.y=element_line(colour="gray90")) +
+  annotate("segment", x=-Inf, xend=Inf, y=-Inf, yend=-Inf) +
+  annotate("segment", x=-Inf, xend=-Inf, y=-Inf, yend=Inf)
+
+selected.expr.plot
+
+ggsave(selected.expr.plot, filename="results/selected_expr.svg", dpi=600, width=25, height=15, scale=1)
+
+```
+
+## Metadata
+
+```{r Metadata plots}
+
+SCFA.dd %>%
+  filter(Variable=="amount", Time!="T7" | Replicate!="C") %>%
+  select(-Replicate, -Variable) %>%
+  gather(key="SCFA_name", value="Amount", -Time) %>%
+  filter(SCFA_name%in%c("Acetic_acid", "Butyric_acid", "Lactic_acid")) %>%
+  ggplot(aes(x=Time, y=Amount, group=SCFA_name, color=SCFA_name, fill=SCFA_name)) +
+  geom_point() +
+  geom_smooth(se=T, level=.9, method="gam", formula=y~poly(x, 3), alpha=0.25) +
+  labs(y="Amount [g/l]")
+
+meta.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(Time, CO2, CH4, H2) %>%
+  mutate(Other=100-CO2-CH4-H2) %>%
+  select(-CO2) %>%
+  gather(key="Gas_name", value="Amount", -Time) %>%
+  ggplot(aes(x=Time, y=Amount, group=Gas_name, color=Gas_name, fill=Gas_name)) +
+  geom_point() +
+  geom_smooth(se=T, level=.9, method="gam", formula=y~poly(x, 3), alpha=0.25) +
+  labs(y="Amount [%]")
+
+meta.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(Time, Spruce) %>%
+  gather(key="Spruce", value="Amount", -Time) %>%
+  ggplot(aes(x=Time, y=100-Amount, group=Spruce, color=Spruce, fill=Spruce)) +
+  geom_point() +
+  geom_smooth(se=T, level=.9, method="gam", formula=y~poly(x, 2), alpha=0.25) +
+  labs(y="Spruce [%]")
+
+sacch.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(-Replicate) %>%
+  gather(key="Sacch_name", value="Amount", -Time) %>%
+  ggplot(aes(x=Time, y=Amount, group=Sacch_name, color=Sacch_name, fill=Sacch_name)) +
+  geom_point() +
+  geom_smooth(se=T, level=.9, method="gam", formula=y~poly(x, 3), alpha=0.25) +
+  labs(y="Amount [g/l]")
+
+tmp.dd1 <- SCFA.dd %>%
+  filter(Variable=="amount", Time!="T7" | Replicate!="C") %>%
+  select(-Replicate, -Variable) %>%
+  gather(key="Var_name", value="Amount", -Time) %>%
+  filter(Var_name%in%c("Acetic_acid", "Butyric_acid", "Lactic_acid"))
+tmp.dd2 <- meta.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(Time, CO2, CH4, H2) %>%
+  select(Time, CH4) %>%
+  gather(key="Var_name", value="Amount", -Time)
+tmp.dd3 <- meta.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(Time, CO2) %>%
+  gather(key="Var_name", value="Amount", -Time)
+tmp.dd4 <- meta.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(Time, Spruce) %>%
+  mutate(Spruce=100-Spruce) %>%
+  gather(key="Var_name", value="Amount", -Time)
+tmp.dd5 <- sacch.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(-Replicate) %>%
+  gather(key="Var_name", value="Amount", -Time) %>%
+  mutate(Amount=Amount*1000)
+tmp.dd6 <- meta.dd %>%
+  filter(Time!="T7" | Replicate!="C") %>%
+  select(Time, H2) %>%
+  gather(key="Var_name", value="Amount", -Time)
+
+dd.meta <- rbind(cbind(tmp.dd1, rep("SCFA", nrow(tmp.dd1))) %>% `colnames<-`(c(colnames(tmp.dd1), "extra_tag")),
+                 cbind(tmp.dd2, rep("Gas2", nrow(tmp.dd2))) %>% `colnames<-`(c(colnames(tmp.dd1), "extra_tag")),
+                 cbind(tmp.dd3, rep("Gas1", nrow(tmp.dd3))) %>% `colnames<-`(c(colnames(tmp.dd1), "extra_tag")),
+                 cbind(tmp.dd6, rep("Gas3", nrow(tmp.dd6))) %>% `colnames<-`(c(colnames(tmp.dd1), "extra_tag")),
+                 cbind(tmp.dd4, rep("Cell_deg", nrow(tmp.dd4))) %>% `colnames<-`(c(colnames(tmp.dd1), "extra_tag")),
+                 cbind(tmp.dd5, rep("sugars", nrow(tmp.dd5))) %>% `colnames<-`(c(colnames(tmp.dd1), "extra_tag")))
+
+meta.plot <- dd.meta %>%
+  mutate(Time=tolower(Time)) %>%
+  ggplot(aes(x=Time, y=Amount, group=Var_name, color=Var_name, fill=Var_name)) +
+  geom_point() +
+  geom_smooth(se=T, level=.9, method="gam", formula=y~poly(x, 3), alpha=0.25) +
+  facet_grid(factor(extra_tag, levels=c("Cell_deg", "sugars", "SCFA", "Gas1", "Gas2", "Gas3"))~., scales="free_y") +
+  theme_classic() +
+  theme(panel.grid.major.x=element_line(colour="gray"),
+        panel.grid.major.y=element_line(colour="gray90"))
+
+ggsave(meta.plot, filename="results/meta.svg", dpi=600, width=3.5)
+
+meta.plot
+
+```
+
+### Kegg+Taxonomy
+
+```{r Kegg+Taxonomy}
+
+KeggAnnotation.MG.tax <- concussion((gene_map%>%rownames_to_column("ORF")%>%dplyr::select(-contig)), (as.data.frame(ko_file)%>%`colnames<-`(c("ORF", "KO"))%>%separate("KO", into=c("nope", "D_code"), sep=":")%>%dplyr::select(-nope)), "ORF")
+KeggAnnotation.MT.tax <- concussion(KeggAnnotation.MT, (RNA.tax_map %>% `colnames<-`(c("ORF", "bin"))), "ORF") %>% dplyr::select(-Kcode) %>%
+  mutate(bin=case_when(bin%in%c("COPR1", "COPR2", "COPR3", "BWF2A", "SW3C")~"COPR0",
+                       !bin%in%c("COPR1", "COPR2", "COPR3", "BWF2A", "SW3C")~bin))
+KeggAnnotation.MP.tax <- concussion(KeggAnnotation.MP,  (protein.tax_map %>% `colnames<-`(c("ORF", "bin"))), "ORF") %>% dplyr::select(-Kcode) %>%
+  mutate(bin=case_when(bin%in%c("COPR1", "COPR2", "COPR3", "BWF2A", "SW3C")~"COPR0",
+                       !bin%in%c("COPR1", "COPR2", "COPR3", "BWF2A", "SW3C")~bin))
+
+```
+
+### Module completeness
+
+```{r KeggModule completeness}
+
+KeggModules.MG <- query_genomes_to_modules(as.data.frame(KeggAnnotation.MG.tax %>%
+                                                           filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>%
+                                                           group_by(bin) %>%
+                                                           summarise(D_code=paste0(D_code, collapse=","))),
+                                           GENOME_ID_COL=1, GENES_COL=2, splitBy="[,]", META_OUT=T)
+KeggModules.MT <- query_genomes_to_modules(as.data.frame(KeggAnnotation.MT.tax %>%
+                                                           filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>%
+                                                           group_by(bin) %>%
+                                                           summarise(D_code=paste0(D_code, collapse=","))),
+                                           GENOME_ID_COL=1, GENES_COL=2, splitBy="[,]", META_OUT=T)
+KeggModules.MP <- query_genomes_to_modules(as.data.frame(KeggAnnotation.MP.tax %>%
+                                                           filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>%
+                                                           group_by(bin) %>%
+                                                           summarise(D_code=paste0(D_code, collapse=","))),
+                                           GENOME_ID_COL=1, GENES_COL=2, splitBy="[,]", META_OUT=T)
+
+```
+
+### Required Modules
+
+```{r Required Modules}
+
+required.modules <- c("M00008", # Entner-Doudoroff pathway, glucose-6P => glyceraldehyde-3P + pyruvate
+                      #"M00083", # Fatty acid biosynthesis, elongation
+                      #"M00082", # Fatty acid biosynthesis, initiation
+                      "M00150", # Fumarate reductase, prokaryotes
+                      "M00001", # Glycolysis (Embden-Meyerhof pathway), glucose => pyruvate
+                      "M00003", # Gluconeogenesis, oxaloacetate => fructose-6P
+                      "M00009", # Citrate cycle (TCA cycle, Krebs cycle)
+                      "M00010", # Citrate cycle, first carbon oxidation, oxaloacetate => 2-oxoglutarate
+                      "M00011", # Citrate cycle, second carbon oxidation, 2-oxoglutarate => oxaloacetate
+                      #"M00002", # Glycolysis, core module involving three-carbon compounds
+                      "M00012", # Glyoxylate cycle
+                      "M00580", # Pentose phosphate pathway, archaea, fructose 6P => ribose 5P
+                      "M00007", # Pentose phosphate pathway, non-oxidative phase, fructose 6P => ribose 5P
+                      "M00006", # Pentose phosphate pathway, oxidative phase, glucose 6P => ribulose 5P
+                      "M00005", # PRPP biosynthesis, ribose 5P => PRPP
+                      #"M00004", # Pentose phosphate pathway (Pentose phosphate cycle)
+                      #"M00165", # Reductive pentose phosphate cycle (Calvin cycle)
+                      #"M00167", # Reductive pentose phosphate cycle, glyceraldehyde-3P => ribulose-5P
+                      #"M00166", # Reductive pentose phosphate cycle, ribulose-5P => glyceraldehyde-3P
+                      "M00377", # Wood–Ljungdahl pathway
+                      "M00013", # Malonate semialdehyde pathway, propanoyl-CoA => acetyl-CoA
+                      "M00149", # Succinate dehydrogenase, prokaryotes
+                      "M00157", # F-type ATPase, prokaryotes and chloroplasts
+                      "M00159", # V/A-type ATPase, prokaryotes
+                      "M00567", # Methanogenesis, CO2 => methane
+                      
+                      
+                      "M00603", # Aldouronate transport system, put.
+                      "M00201", # alpha-Glucoside transport system
+                      "M00491", # arabinogalactan oligomer/maltooligosaccharide transport system
+                      "M00602", # Arabinosaccharide transport system
+                      "M00206", # Cellobiose transport system
+                      "M00601", # Chitobiose transport system, put.
+                      "M00217", # D-Allose transport system
+                      "M00215", # D-Xylose transport system
+                      "M00197", # Fructooligosaccharide transport system, put.
+                      "M00218", # Fructose transport system
+                      "M00203", # Glucose/arabinose transport system
+                      "M00605", # Glucose/mannose transport system
+                      "M00199", # L-Arabinose/lactose transport system
+                      "M00213", # L-Arabinose transport system
+                      "M00194", # Maltose/maltodextrin transport system
+                      "M00214", # Methyl-galactoside transport system
+                      "M00216", # Multiple sugar transport system
+                      "M00207", # Multiple sugar transport system, put.
+                      "M00205", # N-Acetylglucosamine transport system
+                      "M00606", # N,N'-Diacetylchitobiose transport system
+                      "M00202", # Oligogalacturonide transport system
+                      "M00196", # Raffinose/stachyose/melibiose transport system
+                      "M00220", # Rhamnose transport system
+                      "M00212", # Ribose transport system
+                      "M00221", # Simple sugar transport system, put.
+                      "M00198", # Sn-glycerol-phosphate transport system, put.
+                      "M00200", # Sorbitol/mannitol transport system, put.
+                      "M00204", # Trehalose/maltose transport system
+                      "M00604", # Trehalose transport system
+                      "M00619", # Xylobiose transport system
+
+                      
+                      "M00302", # 2-Aminoethylphosphonate transport system
+                      "M00584", # Acetoin utilization transport system
+                      "M00587", # Arginine/lysine/histidine/glutamine transport system
+                      "M00864", # Arginine/lysine/histidine transport system
+                      "M00235", # Arginine/ornithine transport system
+                      "M00229", # Arginine transport system
+                      "M00228", # Aspartate/glutamate/glutamine transport system
+                      "M00237", # Branched-chain amino acid transport system
+                      "M00324", # Dipeptide transport system
+                      "M00566", # Dipeptide transport system, Firmicutes
+                      "M00238", # D-Methionine transport system
+                      "M00232", # General L-amino acid transport system
+                      "M00230", # Glutamate/aspartate transport system
+                      "M00233", # Glutamate transport system
+                      "M00227", # Glutamine transport system
+                      "M00208", # Glycine betaine/proline transport system
+                      "M00226", # Histidine transport system
+                      "M00865", # Hydroxyproline transporter system
+                      "M00234", # L-Cystine transport system
+                      "M00585", # L-Cystine transport system
+                      "M00863", # Lysine/arginine/ornithine/histidine/octopine transport system, put.
+                      "M00225", # Lysine/arginine/ornithine transport system
+                      "M00589", # Lysine transport system, put.
+                      "M00301", # Mannopine transport system
+                      "M00329", # Multiple protein transport system
+                      "M00322", # Neutral amino acid transport system
+                      "M00231", # Octopine/nopaline transport system
+                      "M00439", # Oligopeptide transport system
+                      "M00239", # Peptides/nickel transport system
+                      "M00583", # Peptide transport system, put.
+                      "M00236", # Polar amino acid transport system, put.
+                      "M00300", # Putrescine transport system
+                      "M00586", # S-methylcysteine transport system, put.
+                      "M00299", # Spermidine/putrescine transport system
+                      "M00193", # Spermidine/putrescine transport system, put.
+                                            
+                      "M00504", # DctB-DctD (C4-dicarboxylate transport) two-component regulatory system
+                      "M00488", # DcuS-DcuR (C4-dicarboxylate metabolism) two-component regulatory system
+                      "M00489", # DctS-DctR (C4-dicarboxylate transport) two-component regulatory system
+                      "M00457", # TctE-TctD (tricarboxylic acid transport) two-component regulatory system
+                      
+                      "M00245", # Cobalt/nickel transport system
+                      "M00240", # Iron complex transport system
+                      "M00318", # Iron/zinc/manganese/copper transport system
+                      "M00454", # KdpD-KdpE (potassium transport) two-component regulatory system
+                      "M00243", # Manganese/iron transport system
+                      "M00317", # Manganese/iron transport system
+                      "M00316", # Manganese transport system
+                      "M00792", # Manganese transport system
+                      "M00319", # Manganese/zinc/iron transport system
+                      "M00791", # Manganese/zinc transport system
+                      "M00423", # Molybdate/tungstate transport system
+                      "M00246", # Nickel transport system
+                      "M00440", # Nickel transport system
+                      "M00444", # PhoQ-PhoP (magnesium transport) two-component regulatory system
+                      "M00253", # Sodium transport system
+                      "M00185", # Sulfate/thiosulfate transport system
+                      "M00244", # Zinc/manganese transport system, put.
+                      "M00242" # Zinc transport system
+
+                      #"M00247", # ABC transport system, put.
+                      #"M00258", # ABC transport system, put.
+                      #"M00254", # ABC-2 type transport system
+                      #"M00314", # Bacitracin transport system
+                      #"M00321", # Bicarbonate transport system
+                      #"M00581", # Biotin transport system                      
+                      #"M00249", # Capsular polysaccharide transport system
+                      #"M00256", # Cell division transport system
+                      #"M00582", # Energy-coupling factor transport system
+                      #"M00252", # Lipooligosaccharide transport system
+                      #"M00320", # Lipopolysaccharide export system
+                      #"M00250", # Lipopolysaccharide transport system
+                      #"M00255", # Lipoprotein-releasing system
+                      #"M00298", # Multidrug/hemolysin transport system
+                      #"M00438", # Nitrate/nitrite transport system
+                      #"M00209", # Osmoprotectant transport system
+                      #"M00222", # Phosphate transport system
+                      #"M00223", # Phosphonate transport system
+                      #"M00437", # Phthalate transport system
+                      #"M00335", # Sec (secretion) system
+                      #"M00436", # Sulfonate transport system
+                      #"M00435", # Taurine transport system
+                      #"M00251", # Teichoic acid transport system
+                      #"M00336", # Twin-arginine translocation (Tat) system
+                      #"M00315", # Uncharacterized ABC transport system
+                      #"M00323", # Urea transport system
+                      #"M00858", # Vi polysaccharide transport system
+                      #"M00241" # Vitamin B12 transport system
+
+)
+
+```
+
+### Motility section
+
+```{r Motility section}
+
+omics <- c("MG", "MT", "MP")
+cols.order <- c(paste("RCLO1", omics, sep="."),
+                paste("CLOS1", omics, sep="."),
+                "COPR1.MG", "BWF2A.MG", "SW3C.MG", "COPR0.MT", "COPR0.MP",
+                paste("TISS1", omics, sep="."),
+                paste("TEPI1", omics, sep="."),
+                paste("TEPI2", omics, sep="."),
+                paste("METH1", omics, sep=".")
+                )
+
+TypeIIIsecretionSys <- c("K02411", "K02412", "K02418", "K02420", "K02419", "K02421", "K02400", "K02401")
+Rod <- c("K02408", "K02387", "K02388", "K02391")
+HookAndControl <- c("K02390", "K02414", "K02389")
+Filament <- c("K02406")
+FilamentCap <- c("K02408")
+Cring <- c("K02410", "K02416", "K02417")
+MSring <- c("K02409")
+Pring <- c("K02394")
+Lring <- c("K02393")
+SpoIVA <- c("K06398")
+mat.flagellum <- matrix(nrow=9, ncol=length(cols.order))
+
+nha <- c("K03315")
+rnf <- c("K03617")
+
+CellCell <- list(list("GH5", "GH6", "GH8", "GH9"), "GH48")
+CellGlu <- list(list("GH1", "GH2", "GH3"), list("GH1", "GH4"), "GH94")
+XylXyl <- list(list("GH3", "GH43"), list("GH10", "GH11", "GH30"))
+mat.CAZymes <- matrix(nrow=3, ncol=length(cols.order))
+
+```
+
+### PathCov function
+
+```{r PathCov function}
+
+PathCov <- function(knames, to_search){
+  to_return <- c()
+  for(i in 1:nrow(knames)){
+      i <- unlist(str_split(knames[i,2], ","))
+      i <- unique(i)
+      to_return <- c(to_return, sum(to_search %in% i)/length(to_search))
+  }
+  return(to_return)
+}
+
+PathCov2 <- function(knames, to_search){
+  to_return <- c()
+  for(i in 1:nrow(knames)){
+      i <- unlist(str_split(knames[i,2], ","))
+      i <- unique(i)
+      block_count <- 0
+      for(j in to_search){
+        if(is.list(j)){
+          block_count <- block_count + (any(i %in% j)+0)
+        } else {
+          block_count <- block_count + ((j %in% i)+0)
+        }
+      }
+      to_return <- c(to_return, block_count/length(to_search))
+  }
+  return(to_return)
+}
+
+IterCov <- function(knames, list_search){
+  mat.out <- matrix(ncol=nrow(knames), nrow=length(list_search))
+  for(j in 1:length(list_search)){
+    if(any(unlist(lapply(list_search[j], is.list)))){
+      mat.out[j,] <- PathCov2(knames, list_search[j][[1]])
+    } else {
+      mat.out[j,] <- PathCov(knames, unlist(list_search[j]))
+    }
+  }
+  rownames(mat.out) <- names(list_search)
+  return(mat.out)
+}
+
+```
+
+### Compute new segments
+
+```{r Compute new segments}
+
+mat.flagellum.MG <- IterCov(as.data.frame((KeggAnnotation.MG.tax %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(TypeIIIsecretionSys, Rod, HookAndControl, Filament, FilamentCap, Cring, MSring, Pring, Lring, SpoIVA))
+rownames(mat.flagellum.MG) <- c("TypeIIIsecretionSys", "Rod", "HookAndControl", "Filament", "FilamentCap", "Cring", "MSring", "Pring", "Lring", "SpoIVA")
+
+mat.flagellum.MT <- IterCov(as.data.frame((KeggAnnotation.MT.tax %>% filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(TypeIIIsecretionSys, Rod, HookAndControl, Filament, FilamentCap, Cring, MSring, Pring, Lring, SpoIVA))
+rownames(mat.flagellum.MT) <- c("TypeIIIsecretionSys", "Rod", "HookAndControl", "Filament", "FilamentCap", "Cring", "MSring", "Pring", "Lring", "SpoIVA")
+
+mat.flagellum.MP <- IterCov(as.data.frame((KeggAnnotation.MP.tax %>% filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(TypeIIIsecretionSys, Rod, HookAndControl, Filament, FilamentCap, Cring, MSring, Pring, Lring, SpoIVA))
+rownames(mat.flagellum.MP) <- c("TypeIIIsecretionSys", "Rod", "HookAndControl", "Filament", "FilamentCap", "Cring", "MSring", "Pring", "Lring", "SpoIVA")
+
+
+mat.CAZymes.MG <- IterCov(as.data.frame((CAZAnnotation.MG %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(CAZ, collapse=",")))), list(CellCell, CellGlu, XylXyl))
+rownames(mat.CAZymes.MG) <- c("CEL => CLB", "CLB => GLU", "XYL => XYS")
+colnames(mat.CAZymes.MG) <- paste0((as.data.frame((CAZAnnotation.MG %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(CAZ, collapse=","))))[,1]), ".MG")
+
+mat.CAZymes.MT <- IterCov(as.data.frame((CAZAnnotation.MT %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(CAZ, collapse=",")))), list(CellCell, CellGlu, XylXyl))
+rownames(mat.CAZymes.MT) <- c("CEL => CLB", "CLB => GLU", "XYL => XYS")
+colnames(mat.CAZymes.MT) <- paste0((as.data.frame((CAZAnnotation.MT %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(CAZ, collapse=","))))[,1]), ".MT")
+
+mat.CAZymes.MP <- IterCov(as.data.frame((CAZAnnotation.MP %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(CAZ, collapse=",")))), list(CellCell, CellGlu, XylXyl))
+rownames(mat.CAZymes.MP) <- c("CEL => CLB", "CLB => GLU", "XYL => XYS")
+colnames(mat.CAZymes.MP) <- paste0((as.data.frame((CAZAnnotation.MP %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(CAZ, collapse=","))))[,1]), ".MP")
+
+
+mat.NA.MG <- IterCov(as.data.frame((KeggAnnotation.MG.tax %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(nha))
+rownames(mat.NA.MG) <- c("Na/H Antiporter")
+
+mat.NA.MT <- IterCov(as.data.frame((KeggAnnotation.MT.tax %>% filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(nha))
+rownames(mat.NA.MT) <- c("Na/H Antiporter")
+
+mat.NA.MP <- IterCov(as.data.frame((KeggAnnotation.MP.tax %>% filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(nha))
+rownames(mat.NA.MP) <- c("Na/H Antiporter")
+
+
+mat.Fd.MG <- IterCov(as.data.frame((KeggAnnotation.MG.tax %>% filter(!bin%in%c("Unbinned", "SYNG1", "SYNG2", "COPR2", "COPR3")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(rnf))
+rownames(mat.Fd.MG) <- c("NAD-Fd-dep Na translocator")
+
+mat.Fd.MT <- IterCov(as.data.frame((KeggAnnotation.MT.tax %>% filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(rnf))
+rownames(mat.Fd.MT) <- c("NAD-Fd-dep Na translocator")
+
+mat.Fd.MP <- IterCov(as.data.frame((KeggAnnotation.MP.tax %>% filter(!bin%in%c("Unbinned", "Other", "SYNG1", "SYNG2", "TEPI0")) %>% group_by(bin) %>% summarise(D_code=paste0(D_code, collapse=",")))), list(rnf))
+rownames(mat.Fd.MP) <- c("NAD-Fd-dep Na translocator")
+```
+
+### Merge new segments
+
+```{r Merge new segments}
+
+KeggModules.MO.MG <- rbind(t(KeggModules.MG$MATRIX[,colnames(KeggModules.MG$MATRIX)%in%required.modules]%>%
+                                  `rownames<-`(paste0(rownames(.), ".MG"))),
+                           mat.NA.MG, mat.Fd.MG, mat.flagellum.MG)
+formatted.tab.MG <- (as.data.frame(matrix(ncol=ncol(KeggModules.MO.MG), nrow=nrow(mat.CAZymes.MG))) %>%
+                             `colnames<-`(colnames(KeggModules.MO.MG)) %>%
+                             `rownames<-`(rownames(mat.CAZymes.MG)))
+formatted.tab.MG[,colnames(formatted.tab.MG)[colnames(formatted.tab.MG)%in%colnames(mat.CAZymes.MG)]] <- mat.CAZymes.MG[,colnames(formatted.tab.MG)[colnames(formatted.tab.MG)%in%colnames(mat.CAZymes.MG)]]
+formatted.tab.MG[is.na(formatted.tab.MG)] <- 0
+KeggModules.MO.MG <- rbind(formatted.tab.MG, KeggModules.MO.MG)
+
+
+KeggModules.MO.MT <- rbind(t(KeggModules.MT$MATRIX[,colnames(KeggModules.MT$MATRIX)%in%required.modules]%>%
+                                  `rownames<-`(paste0(rownames(.), ".MT"))),
+                           mat.NA.MT, mat.Fd.MT, mat.flagellum.MT)
+formatted.tab.MT <- (as.data.frame(matrix(ncol=ncol(KeggModules.MO.MT), nrow=nrow(mat.CAZymes.MT))) %>%
+                             `colnames<-`(colnames(KeggModules.MO.MT)) %>%
+                             `rownames<-`(rownames(mat.CAZymes.MT)))
+formatted.tab.MT[,colnames(formatted.tab.MT)[colnames(formatted.tab.MT)%in%colnames(mat.CAZymes.MT)]] <- mat.CAZymes.MT[,colnames(formatted.tab.MT)[colnames(formatted.tab.MT)%in%colnames(mat.CAZymes.MT)]]
+formatted.tab.MT[is.na(formatted.tab.MT)] <- 0
+KeggModules.MO.MT <- rbind(formatted.tab.MT, KeggModules.MO.MT)
+
+KeggModules.MO.MP <- rbind(t(KeggModules.MP$MATRIX[,colnames(KeggModules.MP$MATRIX)%in%required.modules]%>%
+                                  `rownames<-`(paste0(rownames(.), ".MP"))),
+                           mat.NA.MP, mat.Fd.MP,  mat.flagellum.MP)
+formatted.tab.MP <- (as.data.frame(matrix(ncol=ncol(KeggModules.MO.MP), nrow=nrow(mat.CAZymes.MP))) %>%
+                             `colnames<-`(colnames(KeggModules.MO.MP)) %>%
+                             `rownames<-`(rownames(mat.CAZymes.MP)))
+formatted.tab.MP[,colnames(formatted.tab.MP)[colnames(formatted.tab.MP)%in%colnames(mat.CAZymes.MP)]] <- mat.CAZymes.MP[,colnames(formatted.tab.MP)[colnames(formatted.tab.MP)%in%colnames(mat.CAZymes.MP)]]
+formatted.tab.MP[is.na(formatted.tab.MP)] <- 0
+KeggModules.MO.MP <- rbind(formatted.tab.MP, KeggModules.MO.MP)
+
+```
+
+### Expand kegg df
+
+```{r Expand kegg df}
+
+KEGG.Modules.ext.df <- rbind(matrix(rep(c("CEL => CLB", "CLB => GLU", "XYL => XYS"), 3), ncol=3) %>%
+                               `colnames<-`(colnames(KEGG.Modules.df)),
+                             KEGG.Modules.df,
+                             matrix(rep("Na/H Antiporter", 3), ncol=3) %>%
+                               `colnames<-`(colnames(KEGG.Modules.df)),
+                              matrix(rep("NAD-Fd-dep Na translocator", 3), ncol=3) %>%
+                               `colnames<-`(colnames(KEGG.Modules.df)),
+                             matrix(rep(c("TypeIIIsecretionSys", "Rod", "HookAndControl",
+                                          "Filament", "FilamentCap", "Cring",
+                                          "MSring", "Pring", "Lring", "SpoIVA"), 3), ncol=3) %>%
+                               `colnames<-`(colnames(KEGG.Modules.df)))
+
+```
+
+
+### Collapse matrices
+
+```{r Collapse matrices}
+
+
+KeggModules.MO.reduced <- concussion(as.data.frame(cbind(KeggModules.MO.MG,
+                                                          KeggModules.MO.MT,
+                                                          KeggModules.MO.MP)) %>%
+  rownames_to_column("Mod_code"), KEGG.Modules.ext.df, "Mod_code")
+
+```
+
+### Plot matrix
+
+```{r plot matrix}
+
+KMMR <- KeggModules.MO.reduced %>%
+  gather("bin.MO", "ModPerc", -c(Mod_name, Mod_code, Mod_short)) %>%
+  mutate(Organism=str_sub(bin.MO, 1, 5)) %>%
+  mutate(Organism=case_when(Organism%in%c("COPR0", "COPR1", "BWF2A", "SW3C.")~"COPR0",
+                            !Organism%in%c("COPR0", "COPR1", "BWF2A", "SW3C.")~Organism))
+
+new_colors <- c("gold3", "chocolate4", "navy", "brown1", "cadetblue2", "cadetblue", "forestgreen")
+
+names(new_colors) <- unique(KMMR$Organism)
+
+tmp <- KMMR %>% group_by(Mod_code, Mod_short) %>% summarise()
+tmp2 <- tmp[match(c(c("CEL => CLB", "CLB => GLU", "XYL => XYS"),
+             required.modules,
+             c("Na/H Antiporter"),
+             c("NAD-Fd-dep Na translocator"),
+             c("TypeIIIsecretionSys", "Rod", "HookAndControl",
+               "Filament", "FilamentCap", "Cring",
+               "MSring", "Pring", "Lring", "SpoIVA")), tmp$Mod_code),]
+
+MOmat.plot <- as.data.frame(rbind((KMMR %>% filter(ModPerc>.7) %>% mutate(ModPerc=1)),
+      (KMMR %>% filter(ModPerc>.9) %>% mutate(ModPerc=2)))) %>%
+  mutate(Mod_code=factor(Mod_code, levels = required.modules)) %>%
+  ggplot(aes(x=factor(bin.MO, levels=cols.order), y=factor(Mod_short, levels=rev(tmp2$Mod_short[!duplicated(tmp2$Mod_short)])),
+             shape=as.factor(ModPerc), color=new_colors[Organism])) +
+  geom_point(size=4) +
+  theme_classic() +
+  scale_color_identity() +
+  scale_x_discrete(drop=F, position="top") +
+  coord_equal() +
+  scale_shape_manual(values=c("\u25E4","\u25E2")) +
+  scale_color_identity("MAG", new_colors, names(new_colors), guide="legend") +
+  theme(axis.text.x = element_text(angle = 300, hjust = 1), text=element_text(family="Times New Roman"))
+
+ggsave(MOmat.plot, filename="results/MOmat2.svg", dpi=600, height=10, width=8, scale=1)
+
+rm(tmp, tmp2)
+
+```
+

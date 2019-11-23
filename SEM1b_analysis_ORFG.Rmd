@@ -1,0 +1,291 @@
+---
+title: "Analysis of SEM1b \n Part 2"
+author: "Francesco Delogu"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+## Loading libraries and setting
+
+```{r Load r libraries, results='hide', message=F, warning=F}
+
+options(stringsAsFactors = FALSE)
+
+wd <- paste0(getwd(), "/")
+
+library(tidyverse)
+library("treeio")
+library("ggtree")
+
+```
+
+## Load data
+
+```{r ORFG mat}
+
+gene_map <- read.table(paste0(wd, "data/gene_map.txt"), header=T, row.names=1)
+RNA.expr <- read.csv(paste0(wd, "results/RNA_ALL.csv"), header=T, row.names=1)
+protein.expr <- read.csv(paste0(wd, "results/protein_ALL.csv"), header=T, row.names=1)
+
+colnames(RNA.expr) <- gsub(".", ";", colnames(RNA.expr), fixed=T)
+colnames(protein.expr) <- gsub(".", ";", colnames(protein.expr), fixed=T)
+
+```
+
+```{r ORFG mat}
+
+bins <- unique(gene_map$bin)
+
+MT.ORFG.mat <- matrix(rep(0, length(bins)**2), ncol=length(bins))
+colnames(MT.ORFG.mat) <- bins
+rownames(MT.ORFG.mat) <- bins
+
+MT.ORFG <- colnames(RNA.expr)[grepl(";", colnames(RNA.expr))]
+
+for(i in MT.ORFG){
+  ORFG.tmp <- unlist(strsplit(i, ";"))
+  for(j in ORFG.tmp){
+    for(k in ORFG.tmp){
+      if(k!=j){
+        bin1 <- gene_map[j,]$bin
+        bin2 <- gene_map[k,]$bin
+        if(!is.na(bin1) && !is.na(bin2)){
+          MT.ORFG.mat[bin1, bin2] = MT.ORFG.mat[bin1, bin2] + 1
+        }
+      }
+    }
+  }
+}
+diag(MT.ORFG.mat) <- diag(MT.ORFG.mat)/2
+
+
+MP.ORFG.mat <- matrix(rep(0, length(bins)**2), ncol=length(bins))
+colnames(MP.ORFG.mat) <- bins
+rownames(MP.ORFG.mat) <- bins
+
+MP.ORFG <- colnames(protein.expr)[grepl(";", colnames(protein.expr))]
+
+for(i in MP.ORFG){
+  ORFG.tmp <- unlist(strsplit(i, ";"))
+  for(j in ORFG.tmp){
+    for(k in ORFG.tmp){
+      if(k!=j){
+        bin1 <- gene_map[j,]$bin
+        bin2 <- gene_map[k,]$bin
+        if(!is.na(bin1) && !is.na(bin2)){
+          MP.ORFG.mat[bin1, bin2] = MP.ORFG.mat[bin1, bin2] + 1
+        }
+      }
+    }
+  }
+}
+diag(MP.ORFG.mat) <- diag(MP.ORFG.mat)/2
+
+```
+
+## Make plots
+
+```{r ORFG plot}
+tmp <- log10(MP.ORFG.mat+1)
+tmp <- abs(tmp/max(tmp))
+tmp <- 1-tmp
+hc <- hclust(as.dist(tmp))
+plot(hc)
+
+tree_plot <- ggtree(as.phylo(hc)) +
+  geom_tree() +
+  scale_x_reverse() +
+  scale_y_reverse() +
+  coord_flip() +
+  geom_treescale(x=0, y=-1) +
+  geom_tiplab(size=3, aes(angle=90), offset=-0.1)
+
+plot.ORFGs <- rbind(as.data.frame(MT.ORFG.mat) %>%
+  rownames_to_column(var="bin1") %>%
+  gather(key="bin2", value="value", -bin1) %>%
+  mutate(molecule="RNA"),
+  as.data.frame(MP.ORFG.mat) %>%
+    rownames_to_column(var="bin1") %>%
+    gather(key="bin2", value="value", -bin1) %>%
+    mutate(molecule="protein")) %>%
+  ggplot(aes(x=factor(bin1, levels=rev(hc$labels[hc$order])),
+             y=factor(bin2, levels=rev(hc$labels[hc$order])),
+             size=ifelse(value==0, NA, log10(value)),
+             color=molecule)) +
+  geom_point() +
+  theme_classic() +
+  facet_wrap(.~factor(molecule, levels=c("RNA", "protein"))) +
+  guides(color=guide_legend(title="Molecule"), size=guide_legend(title="log10(#ORFs)")) +
+  labs(x="GC content", y="log(coverage)") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+tree_plot
+plot.ORFGs
+
+ggsave(paste0(wd, "results/tree_plot.png"), tree_plot, dpi=320, height=5, width=10)
+ggsave(paste0(wd, "results/ORRGs_plot.png"), plot.ORFGs, dpi=320, height=5, width=12)
+
+```
+
+## ORFs per ORFGs dist
+
+```{r ORFs per ORFGs dist}
+
+table(unlist(lapply(strsplit(MT.ORFG, ";"), function(x) length(x))))
+table(unlist(lapply(strsplit(MP.ORFG, ";"), function(x) length(x))))
+
+```
+
+
+## Species ORFGs
+
+```{r Species ORFGs}
+
+conv_tax <- c("COPR0", "COPR0", "COPR0", "COPR0", "COPR0", "TEPI0", "TEPI0", "SYNG0", "SYNG0")
+names(conv_tax) <- c("COPR1", "COPR2", "COPR3", "BWF2A", "SW3C", "TEPI1", "TEPI2", "SYNG1", "SYNG2")
+
+MT.tax_array <- rep(0, 4)
+names(MT.tax_array) <- c("One species", "Unbinned", "One species + Unbinned", "Other")
+
+for(i in MT.ORFG){
+  ORFG.tmp <- unlist(strsplit(i, ";"))
+  tax.tmp <- gene_map[ORFG.tmp,]$bin
+  tax.unique <- unique(tax.tmp)
+  tax.converted <- unique(ifelse(tax.unique%in%names(conv_tax), conv_tax[tax.unique], tax.unique))
+  if(length(tax.converted)==1){
+    if(tax.converted=="Unbinned"){
+      MT.tax_array["Unbinned"]=MT.tax_array["Unbinned"]+1
+    } else {
+      MT.tax_array["One species"]=MT.tax_array["One species"]+1
+    }
+  } else {
+    if(length(tax.converted)==2){
+       if("Unbinned"%in%tax.unique){
+         MT.tax_array["One species + Unbinned"]=MT.tax_array["One species + Unbinned"]+1
+       } else {
+         MT.tax_array["Other"]=MT.tax_array["Other"]+1
+       }
+    } else {
+         MT.tax_array["Other"]=MT.tax_array["Other"]+1
+       }
+  }
+  rm(ORFG.tmp, tax.tmp, tax.unique, tax.converted)
+}
+
+MP.tax_array <- rep(0, 4)
+names(MP.tax_array) <- c("One species", "Unbinned", "One species + Unbinned", "Other")
+
+for(i in MP.ORFG){
+  ORFG.tmp <- unlist(strsplit(i, ";"))
+  tax.tmp <- gene_map[ORFG.tmp,]$bin
+  tax.unique <- unique(tax.tmp)
+  tax.converted <- unique(ifelse(tax.unique%in%names(conv_tax), conv_tax[tax.unique], tax.unique))
+  if(length(tax.converted)==1){
+    if(tax.converted=="Unbinned"){
+      MP.tax_array["Unbinned"]=MP.tax_array["Unbinned"]+1
+    } else {
+      MP.tax_array["One species"]=MP.tax_array["One species"]+1
+    }
+  } else {
+    if(length(tax.converted)==2){
+       if("Unbinned"%in%tax.unique){
+         MP.tax_array["One species + Unbinned"]=MP.tax_array["One species + Unbinned"]+1
+       } else {
+         MP.tax_array["Other"]=MP.tax_array["Other"]+1
+       }
+    } else {
+         MP.tax_array["Other"]=MP.tax_array["Other"]+1
+       }
+  }
+  rm(ORFG.tmp, tax.tmp, tax.unique, tax.converted)
+}
+
+MT.tax_array
+MP.tax_array
+
+```
+
+## Change labels functions
+
+```{r Change labels functions}
+
+extract.taxa <- function(ORFG, taxa){
+  # ORFG must be in the form ORF;ORF;ORF...;ORF
+  ORFs.tmp <- unlist(strsplit(ORFG, ";"))
+  taxa.subset <- taxa[ORFs.tmp,]
+  return(as.vector(unique(taxa.subset$bin)))
+}
+
+check.taxa <- function(ORFG, taxa){
+  tax.subset <- extract.taxa(ORFG, taxa)
+  if(length(tax.subset)==1){
+    new.block <- c(ORFG, tax.subset)
+  } else {
+    if(length(tax.subset)==2){
+       if("Unbinned"%in%tax.subset){
+         new.block <- c(ORFG, tax.subset[tax.subset!="Unbinned"])
+       } else {
+         new.block <- c(ORFG, "Other")
+       }
+    } else {
+         new.block <- c(ORFG, "Other")
+      }
+  }
+  return(new.block)
+}
+
+check.taxa_var <- function(ORFG, taxa, strain_taxa){
+  tax.subset <- extract.taxa(ORFG, taxa)
+  tax.subset_ii <- extract.taxa(ORFG, strain_taxa)
+  #print(tax.subset_ii)
+  if(length(tax.subset_ii)==1){
+    return(c(ORFG, tax.subset_ii))
+  }
+  if(length(tax.subset)==1){
+    return(c(ORFG, tax.subset))
+  }
+  if(length(tax.subset_ii)==2){
+     if("Unbinned"%in%tax.subset_ii){
+       return(c(ORFG, tax.subset_ii[tax.subset_ii!="Unbinned"]))
+     }
+  }
+  if(length(tax.subset)==2){
+     if("Unbinned"%in%tax.subset){
+       return(c(ORFG, tax.subset[tax.subset!="Unbinned"]))
+     } else {
+       return(c(ORFG, "Other"))
+     }
+  } else {
+       return(c(ORFG, "Other"))
+    }
+  
+}
+
+
+collapse.taxa <- function(ORFGs, taxa, strain_taxa){
+  a <- lapply(ORFGs, check.taxa_var, taxa=taxa, strain_taxa=strain_taxa)
+  new.db <- do.call("rbind", a)
+  colnames(new.db) <- c("ORFG", "bin")
+  return(as.data.frame(new.db))
+}
+
+```
+
+## Change labels
+
+```{r Change labels}
+
+gene_map.species <- gene_map
+gene_map.species$bin <-ifelse(gene_map$bin%in%names(conv_tax), conv_tax[gene_map$bin], gene_map$bin)
+
+RNA.tax_map <- collapse.taxa(colnames(RNA.expr), gene_map.species, gene_map)
+protein.tax_map <- collapse.taxa(colnames(protein.expr), gene_map.species, gene_map)
+
+write.csv(RNA.tax_map, paste0(wd, "results/RNA_tax_map.csv"), quote=F, row.names=F)
+write.csv(protein.tax_map, paste0(wd, "results/protein_tax_map.csv"), quote=F, row.names=F)
+
+```

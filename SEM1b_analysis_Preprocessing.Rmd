@@ -1,0 +1,309 @@
+---
+title: "Analysis of SEM1b \n Part 1"
+author: "Francesco Delogu"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+## Loading libraries and setting
+
+```{r Load r libraries, results='hide', message=F, warning=F}
+library(tidyverse)
+library(matrixStats)
+library(nnet)
+library(microseq)
+library(Peptides)
+library(Matrix)
+
+options(stringsAsFactors=F)
+
+wd <- paste0(getwd(), "/")
+```
+
+## Load data
+
+```{r Load data}
+
+uniques.not_collapsed <- read.table(paste0(wd, "data/not_collapsed.uniques"),
+                                    header=T, row.names=1)
+uniques.collapsed <- read.table(paste0(wd, "data/collapsed.uniques"),
+                                header=T, row.names=1)
+
+mus.not_collapsed <- read.table(paste0(wd, "data/not_collapsed.mus"),
+                                header=T, row.names=1)
+mus.collapsed <- read.table(paste0(wd, "data/collapsed.mus"),
+                            header=T, row.names=1)
+
+LFQprot <- read.table(paste0(wd, "data/Protein_RawSeries.txt"),
+                                header=T, row.names=1)[,1:24]
+uniques.prot <- read.table(paste0(wd, "data/Protein_RawSeries.txt"),
+                            header=T, row.names=1)[,25]
+
+partial_weight <- read.csv(paste0(wd, "results/weight_frac.csv")) 
+
+SpikeIn <- read.table(paste0(wd, "data/SpikeIn_counts.txt"), header=F) %>%
+  `colnames<-`(c("sample", "value"))
+
+```
+
+## Remove decoys from MP
+
+```{r filter decoys}
+
+filter_decoys <- function(x){
+  y <- unlist(str_split(x, ";"))
+  y <- unlist(y[!grepl("REV", y)])
+  if(length(y)==0){
+    warning(paste0("Empty name for ", x))
+  }
+  return(paste(y, collapse=";"))
+}
+
+rownames(LFQprot) <- lapply(rownames(LFQprot), filter_decoys)
+
+```
+
+## Filter functions
+
+```{r Filter functions}
+unique_hits_threshold <- function(mat, x=1){
+  return(matrix((mat>x)+0, ncol=ncol(mat), nrow=nrow(mat), dimnames=list(rownames(mat), colnames(mat))))
+}
+
+samples_threshold <- function(mat, x=1){
+  return(rownames(mat)[which(rowSums(mat)>=x)])
+}
+
+grouping_sequences <- function(mus, uniques, h=0, s=1){
+  rel <- samples_threshold(unique_hits_threshold(uniques, h), s)
+  nohits <- rownames(mus)[which(!rownames(mus)%in%rel)]
+  
+  hits <- samples_threshold(unique_hits_threshold(10**mus))
+  unrel <- hits[which(!hits%in%rel)]
+  noexpr <- nohits[which(!nohits%in%hits)]
+  
+  rel.multi <- rel[grepl("_.*_", rel)]
+  rel.sin <- rel[!rel%in%rel.multi]
+  
+  unrel.multi <- unrel[grepl("_.*_", unrel)]
+  unrel.sin <- unrel[!unrel%in%unrel.multi]
+  
+  noexpr.multi <- noexpr[grepl("_.*_", noexpr)]
+  noexpr.sin <- noexpr[!noexpr%in%noexpr.multi]
+  
+  return(list(rel.sin=rel.sin, rel.multi=rel.multi,
+              unrel.sin=unrel.sin, unrel.multi=unrel.multi,
+              noexpr.sin=noexpr.sin, noexpr.multi=noexpr.multi))
+}
+
+grouping_counts <- function(mus, uniques, h=0, s=1){
+  groups_list <- grouping_sequences(mus, uniques, h=h, s=s)
+  
+  return(matrix(c(length(groups_list$rel.sin), length(groups_list$rel.multi),
+                  length(groups_list$unrel.sin), length(groups_list$unrel.multi),
+                  length(groups_list$noexpr.sin), length(groups_list$noexpr.multi)),
+                ncol=3, dimnames=list(c("singleton", "multi"), c("rel", "no.rel", "no.expr"))))
+}
+
+```
+
+## Reliablity matrices
+
+```{r Reliability matrices, results='axis'}
+
+knitr::kable(grouping_counts(mus.not_collapsed, uniques.not_collapsed))
+knitr::kable(grouping_counts(mus.collapsed, uniques.collapsed))
+
+uniques.prot <- as.matrix(uniques.prot)
+rownames(uniques.prot) <- rownames(LFQprot)
+knitr::kable(grouping_counts(LFQprot, uniques.prot))
+
+```
+
+## Estimation of the ORFs rescue rate
+ 
+```{r Estimate ORFs rescure rate}
+
+extract.collapsed <- function(not_collapsed, collapsed){
+  selected <- c()
+  for(i in not_collapsed){
+    for(j in collapsed){
+      j <- strsplit(j, ";")[[1]]
+      if(i %in% j){
+       selected <- c(selected, i)
+       break
+      }
+    }
+  }
+  return(unique(selected))
+}
+
+not_collapsed.names <- grouping_sequences(mus.not_collapsed, uniques.not_collapsed)
+collapsed.names <- grouping_sequences(mus.collapsed, uniques.collapsed)
+
+rescued <- extract.collapsed(not_collapsed.names$unrel.sin, collapsed.names$rel.multi)
+still <- extract.collapsed(not_collapsed.names$unrel.sin, collapsed.names$unrel.sin)
+group.not_rel <- extract.collapsed(not_collapsed.names$unrel.sin, collapsed.names$unrel.multi)
+
+```
+
+There are `r length(rescued)` (`r round(length(rescued) / grouping_counts(mus.not_collapsed, uniques.not_collapsed)[1,2] * 100, digits=0)`%) singleton unreliable ORFs that found at least a single hit after the grouping procedure, `r length(still)` (`r round(length(still) / grouping_counts(mus.not_collapsed, uniques.not_collapsed)[1,2] * 100, digits=0)`%) that remained unreliable singletons and `r length(group.not_rel)` (`r round(length(group.not_rel) / grouping_counts(mus.not_collapsed, uniques.not_collapsed)[1,2] * 100, digits=0)`%) that joined unreliable expression groups with multiple ORFs.
+
+# Metatrascriptomic dataset
+
+## Transcript deconvolution
+
+```{r Transcript deconvolution}
+
+ORFseq <- readFasta(paste0(wd, "data/MG_genes.fasta")) %>%
+  mutate(ORF_len=nchar(Sequence))
+
+Len.group <- sapply(rownames(mus.collapsed), function(x) sum(ORFseq[ORFseq$Header%in%c(unlist(str_split(x, ";"))),"ORF_len"]))
+SR <- c(7351972, 4752046, 3070957,
+        4360321, 2881443, 5504351,
+        4169387, 6074041, 5249138,
+        4756703, 5283522, 3861792,
+        3513947, 3231369, 2781947,
+        2618982, 2847071, 2556145,
+        3543212, 4834947, 3485962)
+
+IR <- c(1195908, 1878734, 1952908,
+        258100, 438144, 733830,
+        195215, 474112, 306264,
+        262966, 351996, 144862,
+        735976, 283268, 271082,
+        631356, 405036, 2300846,
+        1413424, 642452, 742384)
+
+mus.deconv <- exp(as.matrix(mus.collapsed))    #t(t(exp(as.matrix(mus.collapsed)))/(SR/10**6))/(Len.group/10**3)
+
+#mus.deconv <- t(t(exp(mus.collapsed))*((10**6)/SR))
+
+```
+
+## Transcript normalization
+
+```{r Transcript normalization}
+
+I_nt <- 2743*6.228*(10**9)
+est_T <- I_nt*SR/IR
+
+Tm <- log(t(t(exp(mus.collapsed)*10)*est_T/10**9))
+
+write.table(Tm, file=paste0(wd, "data/collapsed_norm.mus"), sep="\t", quote=FALSE, row.names=T, col.names=T)
+
+```
+
+Retrieved quantities:
+
+* Reads mapping on the spike-in: average `r formatC(mean(Ir), format="e", digits=1)`, standard deviation `r formatC(sd(Ir), format="e", digits=1)`;
+
+* Reads per sample: average `r formatC(mean(Sr), format="e", digits=1)`, standard deviation `r formatC(sd(Sr), format="e", digits=1)`;
+
+* Transcript molecules per sample: average `r formatC(mean(Sm), format="e", digits=1)`, standard deviation `r formatC(sd(Sm), format="e", digits=1)`
+
+# Metaproteomics dataset
+
+```{r hope}
+
+proteins.aa <- readFasta(paste0(wd, "data/MG_genes.faa")) %>%
+  mutate(MW=mw(Sequence))
+
+protein.mass <- read.table(paste0(wd,"data/protein_mass.txt"), header=F) %>%
+  stats::setNames(c("Time", "Replicate", "Value"))
+protein.mass$Value<-protein.mass$Value*partial_weight$Value
+
+total.protein <- t(t(LFQprot)/colSums(LFQprot))
+
+MW.group <- sapply(rownames(LFQprot), function(x) mean(proteins.aa[proteins.aa$Header%in%c(unlist(str_split(x, ";"))),"MW"]))
+
+protein.conentration <- total.protein/MW.group[rownames(total.protein)]
+
+Avogadro_constant = 6.022*(10**23)
+
+Pm <- t(t(protein.conentration)*protein.mass$Value)*Avogadro_constant
+
+```
+
+Retrieved quantities:
+
+* Protein concetration per sample: average `r formatC(mean(py$protein_mass), format="e", digits=1)`, standard deviation `r formatC(sd(py$protein_mass), format="e", digits=1)`;
+
+* Protein molecules per sample: average `r formatC(mean(Pm), format="e", digits=1)`, standard deviation `r formatC(sd(Pm), format="e", digits=1)`
+
+# Expression filters
+
+## MT
+
+```{r MT expression filter}
+
+plot(density(as.matrix(log10(exp(Tm+1)))))
+abline(v=5, col="red")
+RNA.expr <- log10(exp(t(Tm)))[,which(colMins(as.matrix(log10(exp(t(Tm)+1))))>5)]
+
+```
+
+## MP
+
+```{r MP expression filter}
+
+plot(density(as.matrix(log10(Pm+1))))
+abline(v=8, col="red")
+protein.expr <- log10(t(as.matrix(Pm))+1)[,which(colMins(as.matrix(log10(t(Pm)+1)))>9)]
+
+```
+
+# Absolute expression comparison
+
+## Intersection selection
+
+```{r intersection}
+
+## Check how many are in common after filtering
+shared_names <- colnames(RNA.expr)[which(colnames(RNA.expr)%in%colnames(protein.expr))]
+
+## Subset the 2 dataset only with shared names
+RNA.expr_shared <- RNA.expr[,shared_names]
+protein.expr_shared <- protein.expr[,shared_names]
+
+## Subset the 2 dataset only with private names
+RNA.names_private <- colnames(RNA.expr)[!colnames(RNA.expr)%in%shared_names]
+protein.names_private <- colnames(protein.expr)[!colnames(protein.expr)%in%shared_names]
+
+## ORFs and ORFGs
+
+shared_names.ORFGs <- shared_names[grepl("_.*_", shared_names)]
+shared_names.ORFs <- shared_names[!shared_names%in%shared_names.ORFGs]
+RNA.names_private.ORFGs <- RNA.names_private[grepl("_.*_", RNA.names_private)]
+RNA.names_private.ORFs <- RNA.names_private[!RNA.names_private%in%RNA.names_private.ORFGs]
+protein.names_private.ORFGs <- protein.names_private[grepl("_.*_", protein.names_private)]
+pretein.names_private.ORFs <- protein.names_private[!protein.names_private%in%protein.names_private.ORFGs]
+
+## Intersection table
+
+intersection_table <- matrix(c(length(RNA.names_private.ORFs), length(shared_names.ORFs), length(pretein.names_private.ORFs),
+                               length(RNA.names_private.ORFGs), length(shared_names.ORFGs), length(protein.names_private.ORFGs)),
+                             byrow=T, nrow=2)
+colnames(intersection_table) <-c("MT", "MT&MP", "MP")
+rownames(intersection_table) <- c("ORFs", "ORFGs")
+
+## Sared time points
+shared_times <- rownames(RNA.expr)[which(rownames(RNA.expr)%in%rownames(protein.expr))]
+
+knitr::kable(intersection_table)
+
+```
+
+# Print expression tables
+
+```{r print tables}
+
+write.csv(RNA.expr, file=paste("results/RNA_", "ALL",".csv", sep=""), quote=F, row.names=T)
+write.csv(protein.expr, file=paste("results/protein_", "ALL",".csv", sep=""), quote=F, row.names=T)
+
+```
+

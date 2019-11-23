@@ -1,0 +1,107 @@
+---
+title: "Analysis of SEM1b \n MS/MS Peaks"
+author: "Francesco Delogu"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+## Loading libraries and setting
+
+```{r Load r libraries, results='hide', message=F, warning=F}
+
+options(stringsAsFactors = FALSE)
+
+wd <- paste0(getwd(), "/")
+
+library(tidyverse)
+
+```
+
+## Load data
+
+```{r load data}
+
+intensities <- read.table(paste0(wd, "data/ParsedMSMS.txt"), header=F)
+colnames(intensities) <- c("Sample", "Fraction", "Identity", "Value")
+intensities <- intensities %>%
+  separate(Sample, into=c("Time", "Replicate"), sep=2)
+
+```
+
+## Plot data
+
+```{r plot data}
+
+intensities %>%
+  ggplot(aes(x=as.factor(Fraction), y=Value, color=Identity)) +
+  geom_point() +
+  scale_y_log10() +
+  facet_wrap(Time~., scales="free_x") +
+  labs(x="Fraction", y="Mass*Base_peak_intensity")
+
+```
+
+## Sum raw
+
+```{r sum raw}
+
+partial_weight <- intensities %>%
+  group_by(Time, Replicate, Identity) %>%
+  summarise(Value=sum(Value)) %>%
+  spread(Identity, Value) %>%
+  stats::setNames(c("Time", "Replicate", "not_found", "found")) %>%
+  mutate(Sum=found+not_found, found_frac=found/Sum, not_found_frac=not_found/Sum) %>%
+  select(-found, -not_found, -Sum) %>%
+  gather("Identity", Value, -c(Time, Replicate)) %>%
+  filter(Identity=="found_frac") %>%
+  unite(Sample, c(Time, Replicate), sep="") %>%
+  select(-Identity)
+
+write.csv(partial_weight, paste0(wd, "results/weight_frac.csv"), quote=F, row.names=F)
+
+#weight_frac <- partial_weight$Value
+
+
+```
+
+```{r reshape data}
+
+intensities <- intensities %>%
+  spread(Identity, Value) %>%
+  stats::setNames(c("Time", "Replicate", "Fraction", "not_found", "found")) %>%
+  mutate(Sum=found+not_found, found_frac=found/Sum, not_found_frac=not_found/Sum) %>%
+  select(-found, -not_found, -Sum) %>%
+  gather("Identity", Value, -c(Time, Replicate, Fraction))
+
+```
+
+## Plot data frac
+
+```{r plot data frac}
+
+intensities %>%
+  ggplot(aes(x=as.factor(Fraction), y=Value, color=Identity)) +
+  geom_point() +
+  facet_wrap(Time~.) +
+  labs(x="Fraction", y="frac(Mass*Base_peak_intensity)")
+
+```
+
+## Plot data frac summ
+
+```{r plot data frac summ}
+
+intensities %>%
+  group_by(Time, Fraction, Identity) %>%
+  summarise(Value=median(Value)) %>%
+  ggplot(aes(x=as.factor(Fraction), y=Value, color=Identity)) +
+  geom_point() +
+  facet_wrap(Time~.) +
+  labs(x="Fraction", y="frac(Mass*Base_peak_intensity)")
+
+```
+

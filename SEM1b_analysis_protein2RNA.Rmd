@@ -1,0 +1,394 @@
+---
+title: "Analysis of SEM1b \n Protein to RNA ratio"
+author: "Francesco Delogu"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+## Loading libraries and setting
+
+```{r Load r libraries, results='hide', message=F, warning=F}
+library(tidyverse)
+library(matrixStats)
+
+options(stringsAsFactors=F)
+
+wd <- paste0(getwd(), "/")
+```
+
+## Load data
+
+```{r Load data}
+
+Tm <- t(read.csv(paste0(wd, "results/RNA_ALL.csv"), row.names=1)) 
+Pm <- t(read.csv(paste0(wd, "results/protein_ALL.csv"), row.names=1)) 
+
+```
+
+
+## Whole transcriptome and proteome plot
+
+```{r whole MT MP}
+
+mtmp.dd <- cbind(colSums(exp(Tm)), colSums(Pm))
+colnames(mtmp.dd) <- c("RNA", "protein")
+mtmp.plot <- as.data.frame(mtmp.dd) %>%
+  rownames_to_column(var="Time") %>%
+  separate(Time, c("time", "replicate"), sep=2) %>%
+  gather(key="molecule", value="Molecules", 3:4) %>%
+  group_by(time, molecule) %>%
+  summarise(avr_p=mean(Molecules), min_p=min(Molecules), max_p=max(Molecules)) %>%
+  ggplot(aes(x=as.factor(time), y=avr_p, group=molecule, color=molecule)) +
+  geom_line() +
+  geom_errorbar(aes(ymin=min_p, ymax=max_p), width=.1) +
+  theme_classic() +
+  labs(x="Time point", y="Number of Molecules", title="Molecules over time") +
+  facet_grid(molecule~., scales = "free")+
+  scale_colour_manual(name = 'Molecule', 
+                      values =c('protein'='brown','RNA'='green'), labels = c('protein','RNA'))
+
+ggsave(mtmp.plot, filename="results/Whole_molecules.png", dpi=600, height=5, width=8, scale=.75)
+mtmp.plot
+
+as.data.frame(mtmp.dd) %>%
+  rownames_to_column(var="Time") %>%
+  separate(Time, c("time", "replicate"), sep=2) %>%
+  mutate(d=log10(protein/RNA)) %>%
+  select(time, d) %>%
+  group_by(time) %>%
+  summarise(avr_p=mean(d), min_p=min(d), max_p=max(d)) %>%
+  ggplot(aes(x=as.factor(time), y=avr_p, group=1)) +
+  geom_line() +
+  geom_errorbar(aes(ymin=min_p, ymax=max_p), width=.1) +
+  theme_classic()
+
+a <- as.data.frame(mtmp.dd) %>%
+  rownames_to_column(var="Time") %>%
+  separate(Time, c("time", "replicate"), sep=2) %>%
+  mutate(d=log10(protein/RNA)) %>%
+  filter(time %in% c("t1", "t2", "t3"))
+
+```
+
+## Shared ORFGs and time
+
+```{r shared ORFGs and time}
+
+RNA.expr <- t(Tm)
+protein.expr <- t(Pm)
+
+## Check how many are in common after filtering
+shared_names <- colnames(RNA.expr)[which(colnames(RNA.expr)%in%colnames(protein.expr))]
+
+## Subset the 2 dataset only with shared names
+RNA.expr_shared <- RNA.expr[,shared_names]
+protein.expr_shared <- protein.expr[,shared_names]
+
+## Subset the 2 dataset only with private names
+RNA.names_private <- colnames(RNA.expr)[!colnames(RNA.expr)%in%shared_names]
+protein.names_private <- colnames(protein.expr)[!colnames(protein.expr)%in%shared_names]
+
+shared_times <- rownames(RNA.expr)[which(rownames(RNA.expr)%in%rownames(protein.expr))]
+
+```
+
+## Expression density plot
+
+```{r abs plot}
+
+CompDensity <- ggplot() +
+  geom_density(aes(x=c(RNA.expr_shared),col="green")) +
+  geom_density(aes(x=c(protein.expr_shared), col="brown")) +
+  theme_classic() +
+  scale_colour_manual(name = 'Molecule', 
+                      values =c('brown'='brown','green'='green'), labels = c('protein','RNA')) +
+  #annotate("segment", x=8.2 , xend=12.6, y=0.57, yend=0.57) +
+  #annotate("text", x=10.5, y=0.55, label="Difference: ~4/5 orders of magnitude") +
+  labs(x="log10(molecules)/sample", y="Distribution density", title="Number of molecues per sample")
+
+ggsave(CompDensity, filename="results/ComparedDensity.png", dpi=600, height=5, width=6, scale=.75)
+
+CompDensity
+
+```
+
+## Expression correlation
+
+```{r Expression PCC}
+
+transcript_protein_PCC <- rep(0, length(shared_names))
+for(i in 1:length(shared_names)){
+  transcript_protein_PCC[i] <- cor(unlist(RNA.expr_shared[shared_times,shared_names[i]]),
+                                   unlist(protein.expr_shared[shared_times,shared_names[i]]),
+                                   method=c("pearson"))
+}
+
+Corr_coeff <- ggplot() +
+  #geom_vline(xintercept=median(transcript_protein_PCC), colour="red") +
+  geom_histogram(aes(x=transcript_protein_PCC, col="black", alpha=0.3), breaks=seq(from=-1, to=1, by=.1)) +
+  #geom_density(aes(x=transcript_protein_PCC, col="grey")) +
+  scale_colour_identity() +
+  guides(alpha=F) +
+  theme_classic() +
+  labs(x="Pearson Correlation Coefficient", y="Count", title="Linear correlation of transcripts and proteins") #+
+  annotate("text", x=median(transcript_protein_PCC)-.15, y=275,
+           label=paste("Median=",toString(round(median(transcript_protein_PCC),2)), sep=""))
+  
+  
+ggsave(Corr_coeff, filename="results/PCC_transcript_protein.svg", dpi=600, height=5, width=6, scale=1)
+
+Corr_coeff
+
+```
+
+## Time split
+
+```{r split tables}
+
+gene_map <- read.table(paste0(wd, "data/gene_map.txt"), header=T, row.names=1)
+
+bin_list <- gene_map[colnames(RNA.expr_shared),]$bin
+
+df.expr <- cbind(gather(as.data.frame(RNA.expr_shared) %>% rownames_to_column(var="Time"), ORF, RNA, -Time) %>% separate(Time, c("time", "replicate"), sep=2), gather(as.data.frame(protein.expr_shared) %>% rownames_to_column(var="Time"), ORF, protein, -Time) %>% separate(Time, c("time", "replicate"), sep=2) %>% filter(time!="t1") %>% select(protein))
+df.expr <- cbind(df.expr, bin=gene_map[df.expr$ORF,]$bin) %>% filter(!is.na(bin))
+
+new_colors <- c("gold3", "chocolate4", "navy", "brown1", "cadetblue2", "cadetblue", "forestgreen")
+names(new_colors) <- c("COPR0", "CLOS1", "METH1", "RCLO1", "TEPI1", "TEPI2", "TISS1")
+new_colors1 <- new_colors
+names(new_colors1) <- c("COPR1", names(new_colors1)[2:length(new_colors1)])
+
+plot_expr1 <- df.expr %>%
+  filter(bin!="Unbinned", time!="t7" | replicate!="C") %>%
+  ggplot(aes(x=as.numeric(RNA), y=as.numeric(protein))) +
+  geom_density_2d(alpha=0.7) +
+  facet_wrap(.~as.factor(time), nrow=2) +
+  theme_minimal() +
+  theme(panel.border = element_rect(color="black", fill=NA, size=1),
+        strip.background=element_rect(fill="white")) +
+  labs(x="log10(RNA) [molecules/sample]", y="log10(protein) [molecules/sample]",
+         title="Compared quantification of transcript and protein production") +
+  guides(color=guide_legend("Genome"))
+
+plot_expr2 <- df.expr %>%
+  filter(bin!="Unbinned", time!="t7" | replicate!="C") %>%
+  ggplot(aes(x=as.numeric(RNA), y=as.numeric(protein), color=as.factor(bin))) +
+  geom_point(alpha=0.7) +
+  geom_density_2d(color="black", alpha=0.5) +
+  facet_grid(as.factor(bin)~as.factor(time)) +
+  theme_minimal() +
+  theme(panel.border = element_rect(color="black", fill=NA, size=1),
+        strip.background=element_rect(fill="white")) +
+  labs(x="log10(RNA) [molecules/sample]", y="log10(protein) [molecules/sample]",
+         title="Compared quantification of transcript and protein production") +
+  guides(color=guide_legend("Genome")) 
+#geom_smooth(method="glm", se=F, color="black")
+
+plot_expr3 <- df.expr %>%
+  filter(bin%in%c("RCLO1", "TISS1", "TEPI1", "METH1"), time!="t7" | replicate!="C") %>%
+  ggplot(aes(x=as.numeric(RNA), y=as.numeric(protein), color=new_colors1[bin])) +
+  geom_point(alpha=0.7) +
+  geom_density_2d(color="black", alpha=0.5) +
+  scale_color_identity("MAG", new_colors1, names(new_colors1), guide="legend") +
+  facet_grid(factor(bin, levels=c("RCLO1", "TISS1", "TEPI1", "METH1"))~as.factor(time)) +
+  theme_minimal() +
+  theme(panel.border = element_rect(color="black", fill=NA, size=1),
+        strip.background=element_rect(fill="white")) +
+  labs(x="log10(RNA) [molecules/sample]", y="log10(protein) [molecules/sample]",
+         title="Compared quantification of transcript and protein production") +
+  guides(color=guide_legend("Genome")) 
+
+ggsave(plot_expr1, filename="results/expr_plot1.pdf", dpi=600, height=5, width=10, scale=1)
+ggsave(plot_expr2, filename="results/expr_plot2.pdf", dpi=600, height=18, width=12, scale=1)
+ggsave(plot_expr3, filename="results/expr_plot3.svg", dpi=600, height=4, width=7, scale=1)
+
+plot_expr1
+
+```
+
+
+
+## Compute ratio
+
+```{r compute ratio}
+
+plot_ratios <- df.expr %>%
+  filter(!bin%in%c("Unbinned", "METH1"), time!="t7" | replicate!="C") %>%
+  group_by(time, ORF) %>%
+  summarise(RNA=mean(RNA), protein=mean(protein)) %>%
+  mutate(d=protein-RNA) %>%
+  dplyr::select(time, d) %>%
+  group_by(time) %>%
+  ggplot(aes(x=d)) +
+  geom_histogram() +
+  facet_grid(.~time) +
+  labs(x="Protein to transcript ratio (log10)", y="Count") +
+  theme_classic()
+
+ggsave(plot_ratios, filename="results/ratios.png", dpi=600, height=5, width=6, scale=.75)
+plot_ratios
+
+df.expr %>%
+  filter(!bin%in%c("Unbinned", "METH1"), time!="t7" | replicate!="C") %>%
+  group_by(time, replicate, ORF, bin) %>%
+  summarise(RNA=mean(RNA), protein=mean(protein)) %>%
+  mutate(d=(protein-RNA)) %>%
+  group_by(time, bin, replicate) %>%
+  summarise(m=10**median(d)) %>%
+  ggplot(aes(x=time, y=m, group=bin, color=bin))+
+  geom_point() +
+  geom_smooth(se=F, level=0.95, method="glm", formula=y~poly(x, 3))
+
+df.expr %>%
+  filter(time!="t7" | replicate!="C") %>%
+  group_by(time, ORF, bin) %>%
+  summarise(RNA=mean(RNA), protein=mean(protein)) %>%
+  mutate(d=(protein-RNA)) %>%
+  group_by(time, bin) %>%
+  summarise(m=10**median(d)) %>%
+  spread(bin, m)
+
+```
+
+
+## Literature ratios
+
+```{r Literature ratios}
+
+Ghaemmaghami2003 <- read.csv(paste0(wd, "other_sources/Ghaemmaghami2003.csv")) %>%
+  mutate(dataset=rep("Ghaemmaghami2003", nrow(.)), organism=rep("Yeast1", nrow(.)), Domain=rep("Eukarya", nrow(.)))
+
+Schwanhausser2013 <- read.csv(paste0(wd, "other_sources/Li2014.csv")) %>%
+  mutate(dataset=rep("Schwanhausser2013", nrow(.)), organism=rep("Human1", nrow(.)), Domain=rep("Eukarya", nrow(.))) %>%
+  dplyr::select(ORF, protein2RNA, dataset, organism, Domain)
+
+Li2014 <- read.csv(paste0(wd, "other_sources/Li2014.csv")) %>%
+  mutate(dataset=rep("Li2014", nrow(.)), organism=rep("Human2", nrow(.)), Domain=rep("Eukarya", nrow(.))) %>%
+  dplyr::select(ORF, protein2RNA_corrected, dataset, organism, Domain) %>%
+  stats::setNames(c("ORF", "protein2RNA", "dataset", "organism", "Domain"))
+
+Lu2007 <- read.csv(paste0(wd, "other_sources/Lu2007.csv")) %>%
+  mutate(dataset=rep("Lu2007", nrow(.)), organism=rep("Yeast2", nrow(.)), Domain=rep("Eukarya", nrow(.)))
+
+Taniguchi2010 <- read.csv(paste0(wd, "other_sources/Taniguchi2010.csv")) %>%
+  mutate(dataset=rep("Taniguchi2010", nrow(.)), organism=rep("E.coli", nrow(.)), Domain=rep("Bacteria", nrow(.))) %>%
+  dplyr::select(ORF, protein2RNA, dataset, organism, Domain)
+
+SEMB1b_bacterial_ratios <- df.expr %>%
+  filter(bin%in%c("TISS1", "CLOS1", "RCLO1", "TEPI1", "COPR1"), time!="t7" | replicate!="C") %>%
+  group_by(time, ORF, bin) %>%
+  summarise(RNA=mean(RNA), protein=mean(protein)) %>%
+  mutate(d=(protein-RNA)) %>%
+  filter(time=="t4") %>%
+  ungroup() %>%
+  dplyr::select(ORF, d, bin) %>%
+  mutate(protein2RNA=10**d, dataset=rep("SEM1b", nrow(.)), organism=bin, Domain=rep("Bacteria", nrow(.))) %>%
+  dplyr::select(ORF, protein2RNA, dataset, organism, Domain)
+
+SEMB1b_archaeal_ratios <- df.expr %>%
+  filter(bin=="METH1", time!="t7" | replicate!="C") %>%
+  group_by(time, ORF, bin) %>%
+  summarise(RNA=mean(RNA), protein=mean(protein)) %>%
+  mutate(d=(protein-RNA)) %>%
+  filter(time=="t4") %>%
+  ungroup() %>%
+  dplyr::select(ORF, d, bin) %>%
+  mutate(protein2RNA=10**d, dataset=rep("SEM1b", nrow(.)), organism=bin, Domain=rep("Archaea", nrow(.))) %>%
+  dplyr::select(ORF, protein2RNA, dataset, organism, Domain)
+
+lit_ratios <- rbind(Taniguchi2010, SEMB1b_bacterial_ratios, SEMB1b_archaeal_ratios, Ghaemmaghami2003, Lu2007, Schwanhausser2013, Li2014)
+
+dom_colors <- c("limegreen", "firebrick3", "deepskyblue4")
+
+names(dom_colors) <- unique(lit_ratios$Domain)
+
+lit_ratios.plot <- lit_ratios %>%
+  ggplot(aes(x=factor(organism, levels=c("E.coli", "TISS1", "CLOS1",
+                                         "RCLO1", "TEPI1", "COPR1",
+                                         "Yeast1", "Yeast2",
+                                         "Human1", "Human2",
+                                         "METH1")),
+             y=protein2RNA,
+             color=dom_colors[Domain])) +
+  geom_pointrange(stat = "summary",
+                  fun.ymin = function(z) {quantile(z,0.25)},
+                  fun.ymax = function(z) {quantile(z,0.75)},
+                  fun.y = median) +
+  scale_color_identity("Domain", dom_colors, names(dom_colors), guide="legend") +
+  scale_y_log10(breaks=c(100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000)) +
+  theme_classic() +
+  labs(x="Organism", y="(protein molecules)/(RNA molecules)") +
+  theme(axis.text.x=element_text(angle=60, hjust=1),
+        panel.grid.major.y=element_line(size=.1, color="grey"))
+
+ggsave(lit_ratios.plot, filename="results/lit_ratios.svg", dpi=600, height=5, width=8, scale=.75)
+lit_ratios.plot
+
+```
+
+## Check species specificity
+
+```{r Check species specificity}
+
+bacterial.ratios <- rbind(SEMB1b_bacterial_ratios, Taniguchi2010) %>%
+  select(protein2RNA, organism)#, time)
+
+spespe.mat <- matrix(NA, ncol=length(unique(bacterial.ratios$organism)), nrow=length(unique(bacterial.ratios$organism)))
+colnames(spespe.mat) <- unique(bacterial.ratios$organism)
+rownames(spespe.mat) <- unique(bacterial.ratios$organism)
+
+for(i in unique(bacterial.ratios$organism)){
+  for(j in unique(bacterial.ratios$organism)){
+    spespe.mat[i,j] <- t.test(log10((bacterial.ratios %>% filter(organism==i))$protein2RNA), log10((bacterial.ratios %>% filter(organism==j))$protein2RNA))$p.value
+  }
+}
+
+spespe.mat[upper.tri(spespe.mat)] <- p.adjust(spespe.mat[upper.tri(spespe.mat)], method="BH")
+spespe.mat[lower.tri(spespe.mat)] <- p.adjust(spespe.mat[lower.tri(spespe.mat)], method="BH")
+
+ifelse(spespe.mat<.05, 0, 1)
+
+```
+
+## Linaer fitting
+
+```{r linear fitting}
+
+Int.plot <- df.expr %>%
+  mutate(domain=ifelse(bin=="METH1", "Archaea", "Bacteria")) %>%
+  filter(time!="t7" | replicate!="C", RNA>5) %>%
+  #group_by(time, ORF, domain) %>%
+  #summarise(RNA=mean(RNA), protein=mean(protein)) %>%
+  group_by(time, replicate, domain) %>%
+  summarise(p=lm(protein~RNA)$coefficients[1]) %>%
+  group_by(time, domain) %>%
+  ggplot(aes(x=as.factor(time), y=p, group=domain, color=domain)) +
+  geom_point() +
+  theme_classic() +
+  geom_smooth(se=T, level=0.95, method="gam", formula=y~poly(x, 3)) +
+  labs(x="Time point", y="a")
+
+Slope.plot <- df.expr %>%
+  mutate(domain=ifelse(bin=="METH1", "Archaea", "Bacteria")) %>%
+  filter(time!="t7" | replicate!="C", RNA>5, bin%in%c("TISS1", "CLOS1", "RCLO1", "TEPI1", "TEPI2", "COPR1", "METH1")) %>%
+  #group_by(time, ORF, domain) %>%
+  #summarise(RNA=mean(RNA), protein=mean(protein)) %>%
+  group_by(time, replicate, bin) %>%
+  summarise(p=lm(protein~RNA)$coefficients[2])%>%
+  group_by(time, bin) %>%
+  ggplot(aes(x=as.factor(time), y=p, group=bin, color=new_colors1[bin])) +
+  geom_point() +
+  scale_color_identity("MAG", new_colors1, names(new_colors1), guide="legend") +
+  theme_classic() +
+  geom_smooth(se=F, level=0.95, method="gam", formula=y~poly(x, 3)) +
+  labs(x="Time point", y="Linearity [k]")
+
+ggsave(Int.plot, filename="results/Intercept.png", dpi=600, height=5, width=8, scale=.75)
+ggsave(Slope.plot, filename="results/Slope.svg", dpi=600, height=5, width=8, scale=.75)
+Int.plot
+Slope.plot
+
+```

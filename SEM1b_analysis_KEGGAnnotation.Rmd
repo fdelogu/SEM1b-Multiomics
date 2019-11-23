@@ -1,0 +1,143 @@
+---
+title: "Analysis of SEM1b \n KEGG Annotation"
+author: "Francesco Delogu"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+## Loading libraries and setting
+
+```{r Load r libraries, results='hide', message=F, warning=F}
+library(tidyverse)
+
+options(stringsAsFactors = FALSE)
+
+wd <- paste0(getwd(), "/")
+```
+
+## Loading files
+
+```{r Load files}
+
+ko_file <- read.table(paste0(wd, "data/KeggAnnotation.txt"), header=F, sep="\t", colClasses="character")
+
+RNA.expr <- read.csv(paste0(wd, "results/RNA_ALL.csv"), header=T, row.names=1)
+protein.expr <- read.csv(paste0(wd, "results/protein_ALL.csv"), header=T, row.names=1)
+
+colnames(RNA.expr) <- gsub(".", ";", colnames(RNA.expr), fixed=T)
+colnames(protein.expr) <- gsub(".", ";", colnames(protein.expr), fixed=T)
+
+CAZ_map <- read.table(paste0(wd, "data/caz_selected_ext.txt"), header=T) %>%
+  `colnames<-`(c("ORF", "CAZ", "CAZ_group", "bin"))
+
+```
+
+
+## Exploration
+
+```{r Exploration}
+
+ko_file %>%
+  group_by(V1) %>%
+  summarise(n=n()) %>%
+  group_by(n) %>%
+  summarise(nn=n()) %>%
+  ggplot(aes(x=as.factor(n), y=nn)) +
+  geom_histogram(stat="identity") +
+  labs(x="Number of KEGGs per ORF", y="Counts")
+
+```
+
+## Extract KEGG functions
+
+```{r Extract KEGG functions}
+
+extract.KOs <- function(ORFG, ko.db){
+  # ORFG must be in the form ORF;ORF;ORF...;ORF
+  ORFs.tmp <- unlist(strsplit(ORFG, ";"))
+  ko.db.subset <- ko.db %>%
+    filter(V1 %in% ORFs.tmp)
+  return(as.vector(unique(ko.db.subset$V2)))
+}
+
+spread.KOs <- function(ORFG, new.list.KOs){
+  a <- rep(ORFG, length(new.list.KOs))
+  return(cbind(a, new.list.KOs))
+}
+
+check.KO <- function(ORFG, ko.db){
+  KO.subset <- extract.KOs(ORFG, ko.db)
+  if(length(KO.subset)!=0){
+    new.block <- spread.KOs(ORFG, KO.subset)
+  } else {
+    new.block <- c(ORFG, "none")
+  }
+  return(new.block)
+}
+
+collapse.KOs <- function(ORFGs, ko.db){
+  a <- lapply(ORFGs, check.KO, ko.db=ko.db)
+  new.db <- do.call("rbind", a)
+  colnames(new.db) <- c("ORFG", "KO")
+  return(as.data.frame(new.db) %>% filter(KO!="none"))
+}
+
+explosion <- function(df, col1, x){
+  return(df[df[,col1]==x,])
+}
+
+concussion <- function(df1, df2, col1){
+  
+  df3 <- 1:(ncol(df1)+ncol(df2)-1)
+  
+  inter_inex <- unique(df1[,col1])[unique(df1[,col1])%in%unique(df2[,col1])]
+  
+  for(i in inter_inex){
+    #print(i)
+    
+    left_block <- as.data.frame(explosion(df1, col1, i))
+    right_block <- as.data.frame(explosion(df2, col1, i)[,colnames(df2)[colnames(df2)!=col1]])
+    
+    for(j in 1:nrow(left_block)){
+      for(z in 1:nrow(right_block)){
+        df3 <- rbind(df3, t(c(unlist(left_block[j,]), unlist(right_block[z,]))))
+      }
+    }
+    
+  }
+  
+  colnames(df3) <- c(colnames(df1), colnames(df2)[colnames(df2)!=col1])
+  
+  return(as.data.frame(df3[-1,]))
+}
+
+```
+
+## Extract GOs
+
+```{r Extract GOs}
+
+RNA.ORFG.KOs <- collapse.KOs(colnames(RNA.expr), ko_file)
+protein.ORFG.KOs <- collapse.KOs(colnames(protein.expr), ko_file)
+
+write.table(RNA.ORFG.KOs, paste0(wd, "results/RNA_ORFG_KOs.txt"), quote=F, row.names=F)
+write.table(protein.ORFG.KOs, paste0(wd, "results/protein_ORFG_KOs.txt"), quote=F, row.names=F)
+
+RNA.ORFG.CAZ <- concussion(data.frame(ORF=colnames(RNA.expr), to_delete=colnames(RNA.expr)), CAZ_map, "ORF") %>%
+  select(-to_delete)
+protein.ORFG.CAZ <- concussion(data.frame(ORF=colnames(protein.expr), to_delete=colnames(protein.expr)), CAZ_map, "ORF") %>%
+  select(-to_delete)
+
+write.table(RNA.ORFG.CAZ, paste0(wd, "results/RNA_ORFG_CAZ.txt"), quote=F, row.names=F)
+write.table(protein.ORFG.CAZ, paste0(wd, "results/protein_ORFG_CAZ.txt"), quote=F, row.names=F)
+
+a <- unlist(lapply(strsplit(colnames(protein.expr), ";"), function(x) length(x)))
+long_ORFG <- colnames(protein.expr)[a==max(a)]
+
+```
+
+
