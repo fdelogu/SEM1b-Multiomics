@@ -1,0 +1,18 @@
+## using "peca_r" executables
+
+## The two files are RNA and protein input files
+FILE_X = RNA_All_peca.txt
+FILE_Y = protein_All_peca.txt
+
+## Indicate that there are two replicates in this data set
+N_REP = 3
+
+## Time points in the experiment
+TIME = 13 18 23 28 33 38 43
+
+## The smoothing parameters. 
+# SMOOTHING= 2.0 1.0
+
+N_BURN = 1000
+N_THIN = 10
+N_SAMPLE = 1000

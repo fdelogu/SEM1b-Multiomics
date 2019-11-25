@@ -1,0 +1,165 @@
+---
+title: "Analysis of SEM1b \n PECA+"
+author: "Francesco Delogu"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+## Loading libraries and setting
+
+```{r Load r libraries, results='hide', message=F, warning=F}
+library(tidyverse)
+library(matrixStats)
+
+options(stringsAsFactors=F)
+
+wd <- paste0(getwd(), "/")
+```
+
+## Load data
+
+```{r Load data}
+
+peca <- read.table(paste0(wd, "peca_results/data_R_CPS.txt"), header=T, row.names=1) %>%
+  select(paste0("R", 0:5), paste0("D", 0:5),
+         paste0("signedCPS", 1:5), paste0("signedCPD", 1:5),
+         paste0("FDR_S", 1:5), paste0("FDR_D", 1:5))
+
+gene_map <- read.table(paste0(wd, "data/gene_map.txt"), header=T, row.names=1)
+KeggMap <- read.table(paste0(wd, "data/ko.txt"), header=T, sep="\t", colClasses=rep("character", 8), encoding="UTF-8", fill=T, quote="")
+KeggAnnotation <- read.table("data/KeggAnnotation.txt", sep="\t", header=F, col.names=c("ORF", "Kcode")) %>%
+  mutate(Kcode = substring(Kcode, 4, 1000))
+
+#heatmap(as.matrix(peca[,1:6]), Colv=NA)
+
+```
+
+## Utility functions
+
+```{r extract multi-entry function}
+
+explosion <- function(df, col1, x){
+  return(df[df[,col1]==x,])
+}
+
+concussion <- function(df1, df2, col1){
+  
+  df3 <- 1:(ncol(df1)+ncol(df2)-1)
+  
+  inter_inex <- unique(df1[,col1])[unique(df1[,col1])%in%unique(df2[,col1])]
+  
+  for(i in inter_inex){
+    #print(i)
+    
+    left_block <- as.data.frame(explosion(df1, col1, i))
+    right_block <- as.data.frame(explosion(df2, col1, i)[,colnames(df2)[colnames(df2)!=col1]])
+    
+    for(j in 1:nrow(left_block)){
+      for(z in 1:nrow(right_block)){
+        df3 <- rbind(df3, t(c(unlist(left_block[j,]), unlist(right_block[z,]))))
+      }
+    }
+    
+  }
+  
+  colnames(df3) <- c(colnames(df1), colnames(df2)[colnames(df2)!=col1])
+  
+  return(as.data.frame(df3[-1,]))
+}
+
+```
+
+## Translational rate change
+
+```{r Translational rate change}
+
+FDR.th <- 0.05
+
+peca.change <- peca %>%
+  rownames_to_column("ORF") %>%
+  filter(FDR_S1<FDR.th | FDR_S2<FDR.th | FDR_S3<FDR.th | FDR_S4<FDR.th | FDR_S5<FDR.th)
+
+#matplot(t(as.matrix(peca.change[,13:17])), type="l")
+#matplot(t(as.matrix(peca.change[,1:6])), type="l")
+
+peca.CPs <- cbind(peca.change[,c("ORF", paste0("FDR_S", 1:5))] %>%
+  gather("Sample", "FDR", -ORF) %>%
+  separate(Sample, into=c("to_delete", "Point"), 5) %>%
+  select(-to_delete),
+  peca.change[,c("ORF", paste0("signedCPS", 1:5))] %>%
+  gather("Sample", "Score", -ORF) %>%
+  separate(Sample, into=c("to_delete", "Point"), 5) %>%
+  select(-to_delete, -ORF, -Point)) %>%
+  filter(FDR<FDR.th, Score<-.9 | Score>.9)
+
+nrow(peca.CPs)
+
+peca.CPs %>%
+  ggplot(aes(x=factor(Point, levels=(1:5)), y=Score)) +
+  geom_boxplot() +
+  theme_classic() +
+  scale_x_discrete(drop=F) +
+  labs(x="Changing Point")
+
+```
+
+## Annotate CPs
+
+```{r Annotate CPs}
+
+peca.CPs <- cbind(peca.CPs, gene_map[peca.CPs$ORF, "bin"]) %>%
+  `colnames<-`(c(colnames(peca.CPs), "Organism"))
+peca.CPs %>% mutate(Direction=sign(Score)) %>% group_by(ORF, Direction) %>% summarise() %>% group_by(Direction) %>% summarise(n=n()) %>% mutate(n_frac=n/sum(n))
+
+peca.CPs <- concussion(peca.CPs, KeggAnnotation, "ORF") 
+colnames(peca.CPs) <- c(colnames(peca.CPs)[1:4], "Organism", "D_code")
+peca.CPs <- concussion(peca.CPs, KeggMap, "D_code") %>%
+  mutate(Direction=ifelse(as.numeric(Score)<0,"Down","Up"))
+
+new_colors <- c("gold3", "chocolate4", "navy", "brown1", "cadetblue2", "cadetblue", "forestgreen")
+names(new_colors) <- c("COPR0", "CLOS1", "METH1", "RCLO1", "TEPI1", "TEPI2", "TISS1")
+
+peca.plot <- peca.CPs %>%
+  filter(Organism%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2", "METH1")) %>%
+  group_by(ORF, Point, Organism, Direction) %>%
+  summarise() %>%
+  group_by(Point, Organism, Direction) %>%
+  summarise(n=n()) %>%
+  group_by(Point, Direction) %>%
+  mutate(perc=n/sum(n), Tot=sum(n)) %>%
+  ggplot(aes(x=factor(Organism, levels=c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2", "METH1")), y=n, fill=new_colors[Organism])) +
+  geom_bar(stat="identity") +
+  facet_grid(factor(Direction, levels=c("Up", "Down"))~factor(Point, levels=1:5), scales="free_y", space="free_y", drop=F) +
+  theme_classic() +
+  scale_fill_identity("MAG", new_colors, names(new_colors), guide="legend") +
+  theme(axis.text.x=element_text(angle=60, hjust=1),
+        panel.grid.major.y=element_line(size=.1, color="grey")) +
+  labs(y="ORF count")
+
+peca.plot
+
+ggsave(peca.plot, filename="results/peca.svg", dpi=600, height=7, width=10, scale=.75)
+
+```
+
+## Functional identification
+
+```{r Functional identification}
+
+length(unique(peca.CPs$ORF))
+
+peca.CPs %>% filter(Organism%in%c("RCLO1", "CLOS1", "TISS1", "TEPI1", "TEPI2", "METH1")) %>% group_by(ORF, Organism, Point, Direction) %>% summarise() %>% group_by(Organism, Point, Direction) %>% summarise(n=n()) 
+
+(peca.CPs %>% filter(Organism%in%c("RCLO1"), Point==1, Direction=="Down") %>% group_by(D_name) %>% summarise())$D_name
+(peca.CPs %>% filter(Organism%in%c("RCLO1"), Point==2, Direction=="Down") %>% group_by(D_name) %>% summarise())$D_name
+(peca.CPs %>% filter(Organism%in%c("RCLO1"), Point==3, Direction=="Down") %>% group_by(D_name) %>% summarise())$D_name
+(peca.CPs %>% filter(Organism%in%c("TISS1"), Point==1, Direction=="Down") %>% group_by(D_name) %>% summarise())$D_name
+(peca.CPs %>% filter(Organism%in%c("TEPI1"), Point==1, Direction=="Down") %>% group_by(D_name) %>% summarise())$D_name
+(peca.CPs %>% filter(Organism%in%c("TEPI2"), Point==1, Direction=="Down") %>% group_by(D_name) %>% summarise())$D_name
+(peca.CPs %>% filter(Organism%in%c("RCLO1"), Point==5, Direction=="Up") %>% group_by(D_name) %>% summarise())$D_name
+
+```

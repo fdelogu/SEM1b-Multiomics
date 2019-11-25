@@ -45,9 +45,6 @@ uniques.prot <- read.table(paste0(wd, "data/Protein_RawSeries.txt"),
 
 partial_weight <- read.csv(paste0(wd, "results/weight_frac.csv")) 
 
-SpikeIn <- read.table(paste0(wd, "data/SpikeIn_counts.txt"), header=F) %>%
-  `colnames<-`(c("sample", "value"))
-
 ```
 
 ## Remove decoys from MP
@@ -307,3 +304,25 @@ write.csv(protein.expr, file=paste("results/protein_", "ALL",".csv", sep=""), qu
 
 ```
 
+# Print peca-compatible tables
+
+```{r print peca-compatible tables}
+
+RNA.mat_tmp <- as.data.frame(t(RNA.expr_shared[shared_times,colnames(RNA.expr_shared) %in% rownames(gene_map)]))
+RNA.mat_tmp[,"t7C"] <- rowMeans(RNA.mat_tmp[,c("t7A", "t7B")])
+write.table(log(10**RNA.mat_tmp)[,c("t2A", "t3A","t4A","t5A","t6A","t7A","t8A",
+                                       "t2B", "t3B","t4B","t5B","t6B","t7B","t8B",
+                                       "t2C", "t3C","t4C","t5C","t6C","t7C","t8C")],
+            file=paste("peca_results/RNA_All_peca.txt"),
+            quote=F, row.names=T, col.names=T, sep="\t") # Add "Gene" to the header
+protein.mat_tmp <- as.data.frame(t(protein.expr_shared[shared_times,colnames(protein.expr_shared) %in% rownames(gene_map)]))
+protein.mat_tmp[,"t7C"] <- rowMeans(protein.mat_tmp[,c("t7A", "t7B")])
+write.table(log(10**protein.mat_tmp)[,c("t2A", "t3A","t4A","t5A","t6A","t7A","t8A",
+                                       "t2B", "t3B","t4B","t5B","t6B","t7B","t8B",
+                                       "t2C", "t3C","t4C","t5C","t6C","t7C","t8C")],
+            file=paste("peca_results/protein_All_peca.txt"),
+            quote=F, row.names=T, col.names=T, sep="\t") # Add "Gene" to the header
+
+rm(RNA.mat_tmp, protein.mat_tmp)
+
+```
