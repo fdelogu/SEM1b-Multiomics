@@ -139,5 +139,3 @@ a <- unlist(lapply(strsplit(colnames(protein.expr), ";"), function(x) length(x))
 long_ORFG <- colnames(protein.expr)[a==max(a)]
 
 ```
-
-

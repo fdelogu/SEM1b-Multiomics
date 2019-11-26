@@ -45,6 +45,8 @@ uniques.prot <- read.table(paste0(wd, "data/Protein_RawSeries.txt"),
 
 partial_weight <- read.csv(paste0(wd, "results/weight_frac.csv")) 
 
+gene_map <- read.table(paste0(wd, "data/gene_map.txt"), header=T, row.names=1)
+
 ```
 
 ## Remove decoys from MP
